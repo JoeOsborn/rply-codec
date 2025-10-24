@@ -1,0 +1,8 @@
+[package]
+name = "rply-codec"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rmp = "0.8.14"
+thiserror = "2.0.17"
