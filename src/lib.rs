@@ -1,4 +1,5 @@
 mod rply;
+mod statestream;
 pub use rply::*;
 
 #[cfg(test)]
