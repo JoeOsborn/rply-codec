@@ -8,28 +8,28 @@ impl std::fmt::Display for InvalidDeterminant {
     }
 }
 
-#[repr(usize)]
-pub enum HeaderV0V1Part {
-    Magic = 0,
-    Version = 4,
-    CRC = 8,
-    StateSize = 12,
-    Identifier = 16,
-    HeaderLen = 24,
-}
-#[repr(usize)]
-enum HeaderV2Part {
-    FrameCount = 24,
-    BlockSize = 28,
-    SuperblockSize = 32,
-    CheckpointConfig = 36,
-    HeaderLen = 40,
-}
-const HEADER_V0V1_LEN_BYTES: usize = HeaderV0V1Part::HeaderLen as usize;
-const HEADER_LEN_BYTES: usize = HeaderV2Part::HeaderLen as usize;
+// #[repr(usize)]
+// pub enum HeaderV0V1Part {
+//     Magic = 0,
+//     Version = 4,
+//     CRC = 8,
+//     StateSize = 12,
+//     Identifier = 16,
+//     HeaderLen = 24,
+// }
+// #[repr(usize)]
+// pub enum HeaderV2Part {
+//     FrameCount = 24,
+//     BlockSize = 28,
+//     SuperblockSize = 32,
+//     CheckpointConfig = 36,
+//     HeaderLen = 40,
+// }
+// const HEADER_V0V1_LEN_BYTES: usize = HeaderV0V1Part::HeaderLen as usize;
+// const HEADER_LEN_BYTES: usize = HeaderV2Part::HeaderLen as usize;
 
-const VERSION: u32 = 2;
-const MAGIC: u32 = 0x42535632;
+// const VERSION: u32 = 2;
+const MAGIC: u32 = 0x4253_5632;
 
 #[repr(u8)]
 #[non_exhaustive]
@@ -148,109 +148,234 @@ pub enum ReplayError {
     #[error("Unsupported version {0}")]
     Version(u32),
     #[error("Unsupported compression scheme {0}")]
-    Compression(#[from] InvalidDeterminant),
+    Compression(InvalidDeterminant),
+    #[error("Unsupported encoding scheme {0}")]
+    Encoding(InvalidDeterminant),
     #[error("I/O Error")]
     IO(#[from] std::io::Error),
     #[error("Coreless frame read for version 0 not possible")]
     NoCoreRead(),
+    #[error("Checkpoint too big {0}")]
+    CheckpointTooBig(std::num::TryFromIntError),
     #[error("Invalid frame token {0}")]
     BadFrameToken(u8),
 }
 
 type Result<T> = std::result::Result<T, ReplayError>;
 
-pub fn read_header(rply: &mut impl std::io::BufRead) -> Result<Header> {
-    let mut bytes = [0; HEADER_LEN_BYTES];
-    rply.read_exact(&mut bytes[0..HEADER_V0V1_LEN_BYTES])?;
-    // These unwraps are safe because if I can take e.g. a slice of length 4, I already have a 4-byte value.
-    // And I know I can take those slices because read_exact read exactly 24 bytes.
-    let magic = u32::from_le_bytes(
-        <[u8; 4]>::try_from(
-            &bytes[(HeaderV0V1Part::Magic as usize)..(HeaderV0V1Part::Magic as usize + 4)],
-        )
-        .unwrap(),
-    );
+pub struct ReplayDecoder<'a, R: std::io::BufRead> {
+    rply: &'a mut R,
+    pub header: Header,
+    pub initial_state: Vec<u8>,
+    pub frame_number: usize,
+}
+
+impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
+    /// Reads a single frame at the current decoder position.
+    /// # Errors
+    /// [`ReplayError::IO`]: Unexpected end of stream or other I/O error
+    /// [`ReplayError::Compression`]: Unsupported compression scheme
+    /// [`ReplayError::Encoding`]: Unsupported encoding scheme
+    /// [`ReplayError::BadFrameToken`]: Frame token not recognized or misaligned
+    /// [`ReplayError::NoCoreRead`]: Tried to read a frame on a version 0 replay without a loaded core
+    /// [`ReplayError::CheckpointTooBig`]: Tried to read a checkpoint bigger than the address space
+    #[allow(clippy::too_many_lines)]
+    pub fn read_frame(&mut self, frame: &mut Frame) -> Result<()> {
+        use byteorder::{LittleEndian, ReadBytesExt};
+        let vsn = self.header.version();
+        let rply = &mut *self.rply;
+        if vsn == 0 {
+            return Err(ReplayError::NoCoreRead());
+        }
+        if vsn > 1 {
+            /* skip over the backref */
+            let _ = rply.read_u32::<LittleEndian>()?;
+        }
+        let key_count = rply.read_u8()? as usize;
+        frame.key_events.resize_with(key_count, Default::default);
+        for ki in 0..key_count {
+            /*
+            down, padding, mod_x2, code_x4, char_x4
+             */
+            let down = rply.read_u8()?;
+            let _ = rply.read_u8()?; // padding
+            let modf = rply.read_u16::<LittleEndian>()?;
+            let code = rply.read_u32::<LittleEndian>()?;
+            let chr = rply.read_u32::<LittleEndian>()?;
+            let key_data = KeyData {
+                down,
+                /* buf[1] is padding */
+                modf,
+                code,
+                chr,
+            };
+            frame.key_events[ki] = key_data;
+        }
+        let input_count = rply.read_u16::<LittleEndian>()? as usize;
+        frame
+            .input_events
+            .resize_with(input_count, Default::default);
+        for ii in 0..input_count {
+            /* port, device, idx, padding, id_x2, value_x2 */
+            let port = rply.read_u8()?;
+            let device = rply.read_u8()?;
+            let idx = rply.read_u8()?;
+            let _ = rply.read_u8()?;
+            let id = rply.read_u16::<LittleEndian>()?;
+            let val = rply.read_i16::<LittleEndian>()?;
+            let inp_data = InputData {
+                port,
+                device,
+                idx,
+                id,
+                val,
+            };
+            frame.input_events[ii] = inp_data;
+        }
+        let tok = rply.read_u8()?;
+        match FrameToken::from(tok) {
+            FrameToken::Invalid => return Err(ReplayError::BadFrameToken(tok)),
+            FrameToken::Regular => {
+                frame.checkpoint_compression = Compression::None;
+                frame.checkpoint_encoding = Encoding::Raw;
+                frame.checkpoint_raw_bytes.clear();
+                frame.checkpoint_uncompressed_raw_bytes.clear();
+                frame.checkpoint_uncompressed_unencoded_bytes.clear();
+            }
+            FrameToken::Checkpoint => {
+                frame.checkpoint_compression = Compression::None;
+                frame.checkpoint_encoding = Encoding::Raw;
+                let cp_size = usize::try_from(rply.read_u64::<LittleEndian>()?)
+                    .map_err(ReplayError::CheckpointTooBig)?;
+                frame.checkpoint_raw_bytes.resize(cp_size, 0);
+                rply.read_exact(frame.checkpoint_raw_bytes.as_mut_slice())?;
+            }
+            FrameToken::Checkpoint2 => {
+                // read a 1 byte compression
+                let compression =
+                    Compression::try_from(rply.read_u8()?).map_err(ReplayError::Compression)?;
+                // read a 1 byte encoding
+                let encoding =
+                    Encoding::try_from(rply.read_u8()?).map_err(ReplayError::Encoding)?;
+                // read a 4 byte uncompressed unencoded size
+                let uc_ue_size = rply.read_u32::<LittleEndian>()? as usize;
+                // read a 4 byte uncompressed encoded size
+                let uc_enc_size = rply.read_u32::<LittleEndian>()? as usize;
+                // read a 4 byte compressed encoded size
+                let comp_enc_size = rply.read_u32::<LittleEndian>()? as usize;
+                // read the compressed encoded data (todo, make a reader instead)
+                frame.checkpoint_raw_bytes.resize(comp_enc_size, 0);
+                rply.read_exact(frame.checkpoint_raw_bytes.as_mut_slice())?;
+                // maybe decompress
+                match compression {
+                    Compression::None => {}
+                    Compression::Zlib => {
+                        use flate2::bufread::ZlibDecoder;
+                        frame
+                            .checkpoint_uncompressed_raw_bytes
+                            .resize(uc_enc_size, 0);
+                        let mut decoder = ZlibDecoder::new(rply);
+                        std::io::copy(
+                            &mut decoder,
+                            &mut std::io::Cursor::new(
+                                frame.checkpoint_uncompressed_raw_bytes.as_mut_slice(),
+                            ),
+                        )?;
+                    }
+                    Compression::Zstd => {
+                        use zstd::Decoder;
+                        frame
+                            .checkpoint_uncompressed_raw_bytes
+                            .resize(uc_enc_size, 0);
+                        let mut decoder = Decoder::with_buffer(rply)?.single_frame();
+                        std::io::copy(
+                            &mut decoder,
+                            &mut std::io::Cursor::new(
+                                frame.checkpoint_uncompressed_raw_bytes.as_mut_slice(),
+                            ),
+                        )?;
+                        decoder.finish();
+                    }
+                }
+                // maybe decode
+                match encoding {
+                    Encoding::Raw => {}
+                    Encoding::Statestream => {
+                        frame
+                            .checkpoint_uncompressed_unencoded_bytes
+                            .resize(uc_ue_size, 0);
+                        // statestream_decode(frame.checkpoint_decompressed_data().unwrap(), &mut frame.checkpoint_uncompressed_unencoded_bytes);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Creates a [`ReplayDecoder`] for the given buffered readable stream.
+///
+/// # Errors
+/// [`ReplayError::IO`]: Some issue with the read stream, e.g. insufficient length or unexpected end
+/// [`ReplayError::Magic`]: Invalid magic number at beginning of file
+/// [`ReplayError::Version`]: Version identifier not recognized by parser
+/// [`ReplayError::Compression`]: Unsupported compression scheme for checkpoints
+pub fn decode<R: std::io::BufRead>(rply: &mut R) -> Result<ReplayDecoder<'_, R>> {
+    use byteorder::{LittleEndian, ReadBytesExt};
+    let magic = rply.read_u32::<LittleEndian>()?;
     if magic != MAGIC {
         return Err(ReplayError::Magic(magic));
     }
-    let version = u32::from_le_bytes(
-        <[u8; 4]>::try_from(
-            &bytes[(HeaderV0V1Part::Version as usize)..(HeaderV0V1Part::Version as usize + 4)],
-        )
-        .unwrap(),
-    );
+    let version = rply.read_u32::<LittleEndian>()?;
     if version > 2 {
         return Err(ReplayError::Version(version));
     }
-    let content_crc = u32::from_le_bytes(
-        <[u8; 4]>::try_from(
-            &bytes[(HeaderV0V1Part::CRC as usize)..(HeaderV0V1Part::CRC as usize + 4)],
-        )
-        .unwrap(),
-    );
-    let initial_state_size = u32::from_le_bytes(
-        <[u8; 4]>::try_from(
-            &bytes[(HeaderV0V1Part::StateSize as usize)..(HeaderV0V1Part::StateSize as usize + 4)],
-        )
-        .unwrap(),
-    );
-    let identifier = u64::from_le_bytes(
-        <[u8; 8]>::try_from(
-            &bytes
-                [(HeaderV0V1Part::Identifier as usize)..(HeaderV0V1Part::Identifier as usize + 8)],
-        )
-        .unwrap(),
-    );
+    let content_crc = rply.read_u32::<LittleEndian>()?;
+    let initial_state_size = rply.read_u32::<LittleEndian>()?;
+    let identifier = rply.read_u64::<LittleEndian>()?;
     let base = HeaderBase {
         version,
         content_crc,
         initial_state_size,
         identifier,
     };
+    let mut initial_state = vec![0; initial_state_size as usize];
     if version < 2 {
-        return Ok(Header::V0V1(base));
+        rply.read_exact(initial_state.as_mut_slice())?;
+        return Ok(ReplayDecoder {
+            header: Header::V0V1(base),
+            rply,
+            initial_state,
+            frame_number: 0,
+        });
     }
-    rply.read_exact(&mut bytes[HEADER_V0V1_LEN_BYTES..HEADER_LEN_BYTES])?;
-    let frame_count = u32::from_le_bytes(
-        <[u8; 4]>::try_from(
-            &bytes[(HeaderV2Part::FrameCount as usize)..(HeaderV2Part::FrameCount as usize + 4)],
-        )
-        .unwrap(),
-    );
-    let block_size = u32::from_le_bytes(
-        <[u8; 4]>::try_from(
-            &bytes[(HeaderV2Part::BlockSize as usize)..(HeaderV2Part::BlockSize as usize + 4)],
-        )
-        .unwrap(),
-    );
-    let superblock_size = u32::from_le_bytes(
-        <[u8; 4]>::try_from(
-            &bytes[(HeaderV2Part::SuperblockSize as usize)
-                ..(HeaderV2Part::SuperblockSize as usize + 4)],
-        )
-        .unwrap(),
-    );
-    let cp_config = u32::from_le_bytes(
-        <[u8; 4]>::try_from(
-            &bytes[(HeaderV2Part::CheckpointConfig as usize)
-                ..(HeaderV2Part::CheckpointConfig as usize + 4)],
-        )
-        .unwrap(),
-    );
+    let frame_count = rply.read_u32::<LittleEndian>()?;
+    let block_size = rply.read_u32::<LittleEndian>()?;
+    let superblock_size = rply.read_u32::<LittleEndian>()?;
+    let cp_config = rply.read_u32::<LittleEndian>()?;
     let checkpoint_commit_interval = (cp_config >> 24) as u8;
     let checkpoint_commit_threshold = ((cp_config >> 16) & 0xFF) as u8;
-    let checkpoint_compression = Compression::try_from(((cp_config >> 8) & 0xFF) as u8)?;
-    Ok(Header::V2(HeaderV2 {
-        base,
-        frame_count,
-        block_size,
-        superblock_size,
-        checkpoint_commit_interval,
-        checkpoint_commit_threshold,
-        checkpoint_compression,
-    }))
+    let checkpoint_compression =
+        Compression::try_from(((cp_config >> 8) & 0xFF) as u8).map_err(ReplayError::Compression)?;
+    rply.read_exact(initial_state.as_mut_slice())?;
+    // TODO: decode if version is 2
+    Ok(ReplayDecoder {
+        rply,
+        initial_state,
+        header: Header::V2(HeaderV2 {
+            base,
+            frame_count,
+            block_size,
+            superblock_size,
+            checkpoint_commit_interval,
+            checkpoint_commit_threshold,
+            checkpoint_compression,
+        }),
+        frame_number: 0,
+    })
 }
 impl Header {
+    #[must_use]
     pub fn version(&self) -> u32 {
         match self {
             Header::V0V1(header_base) => header_base.version,
@@ -286,6 +411,7 @@ pub struct Frame {
 }
 
 impl Frame {
+    #[must_use]
     pub fn checkpoint_decompressed_data(&self) -> Option<&[u8]> {
         if self.checkpoint_raw_bytes.is_empty() {
             return None;
@@ -295,135 +421,31 @@ impl Frame {
             _ => self.checkpoint_uncompressed_raw_bytes.as_slice(),
         })
     }
+    #[must_use]
     pub fn checkpoint_data(&self) -> Option<&[u8]> {
         if self.checkpoint_raw_bytes.is_empty() {
             return None;
         }
-        Some(match (self.checkpoint_compression, self.checkpoint_encoding) {
-            (Compression::None, Encoding::Raw) => self.checkpoint_raw_bytes.as_slice(),
-            (_, Encoding::Raw) => self.checkpoint_uncompressed_raw_bytes.as_slice(),
-            (_, _) => self.checkpoint_uncompressed_unencoded_bytes.as_slice()
-        })
+        Some(
+            match (self.checkpoint_compression, self.checkpoint_encoding) {
+                (Compression::None, Encoding::Raw) => self.checkpoint_raw_bytes.as_slice(),
+                (_, Encoding::Raw) => self.checkpoint_uncompressed_raw_bytes.as_slice(),
+                (_, _) => self.checkpoint_uncompressed_unencoded_bytes.as_slice(),
+            },
+        )
     }
 }
 
 impl Default for Frame {
     fn default() -> Self {
         Self {
-            key_events: Default::default(),
-            input_events: Default::default(),
-            checkpoint_raw_bytes: Default::default(),
-            checkpoint_uncompressed_raw_bytes: Default::default(),
-            checkpoint_uncompressed_unencoded_bytes: Default::default(),
+            key_events: Vec::default(),
+            input_events: Vec::default(),
+            checkpoint_raw_bytes: Vec::default(),
+            checkpoint_uncompressed_raw_bytes: Vec::default(),
+            checkpoint_uncompressed_unencoded_bytes: Vec::default(),
             checkpoint_compression: Compression::None,
             checkpoint_encoding: Encoding::Raw,
         }
     }
-}
-/* TODO instead of Header use ReplayContext and have it include the statestream indices if needed */
-pub fn read_frame(rply: &mut impl std::io::BufRead, header: &Header, frame: &mut Frame) -> Result<()> {
-    let vsn = header.version();
-    if vsn == 0 {
-        return Err(ReplayError::NoCoreRead());
-    }
-    let mut buf: [u8; 16] = [0; 16];
-    if vsn > 1 {
-        /* skip over the backref */
-        rply.read_exact(&mut buf)?;
-    }
-    rply.read_exact(&mut buf[0..1])?;
-    let key_count = buf[0] as usize;
-    frame.key_events.resize_with(key_count, Default::default);
-    for ki in 0..key_count {
-        rply.read_exact(&mut buf[0..12])?;
-        /*
-        down, padding, mod_x2, code_x4, char_x4
-         */
-        let key_data = KeyData {
-            down: buf[0],
-            /* buf[1] is padding */
-            modf: u16::from_le_bytes(<[u8; 2]>::try_from(&buf[2..4]).unwrap()),
-            code: u32::from_le_bytes(<[u8; 4]>::try_from(&buf[4..8]).unwrap()),
-            chr: u32::from_le_bytes(<[u8; 4]>::try_from(&buf[8..12]).unwrap()),
-        };
-        frame.key_events[ki] = key_data;
-    }
-    let input_count = u16::from_le_bytes(<[u8; 2]>::try_from(&buf[0..2]).unwrap()) as usize;
-    frame
-        .input_events
-        .resize_with(input_count, Default::default);
-    for ii in 0..input_count {
-        rply.read_exact(&mut buf[0..8])?;
-        /* port, device, idx, padding, id_x2, value_x2 */
-        let inp_data = InputData {
-            port: buf[0],
-            device: buf[1],
-            idx: buf[2],
-            /* buf[3] is padding */
-            id: u16::from_le_bytes(<[u8; 2]>::try_from(&buf[4..6]).unwrap()),
-            val: i16::from_le_bytes(<[u8; 2]>::try_from(&buf[6..8]).unwrap()),
-        };
-        frame.input_events[ii] = inp_data;
-    }
-    rply.read_exact(&mut buf[0..1])?;
-    match FrameToken::from(buf[0]) {
-        FrameToken::Invalid => return Err(ReplayError::BadFrameToken(buf[0])),
-        FrameToken::Regular => {
-            frame.checkpoint_compression = Compression::None;
-            frame.checkpoint_encoding = Encoding::Raw;
-            frame.checkpoint_raw_bytes.clear();
-            frame.checkpoint_uncompressed_raw_bytes.clear();
-            frame.checkpoint_uncompressed_unencoded_bytes.clear();
-        }
-        FrameToken::Checkpoint => {
-            frame.checkpoint_compression = Compression::None;
-            frame.checkpoint_encoding = Encoding::Raw;
-            rply.read_exact(&mut buf[0..8])?;
-            let cp_size = usize::try_from(u64::from_le_bytes(<[u8; 8]>::try_from(&buf[0..8]).unwrap())).unwrap();
-            frame.checkpoint_raw_bytes.resize(cp_size, 0);
-            rply.read_exact(frame.checkpoint_raw_bytes.as_mut_slice())?;
-        }
-        FrameToken::Checkpoint2 => {
-            rply.read_exact(&mut buf[0..14])?;
-            // read a 1 byte compression
-            let compression = Compression::try_from(buf[0])?;
-            // read a 1 byte encoding
-            let encoding = Encoding::try_from(buf[1])?;
-            // read a 4 byte uncompressed unencoded size
-            let uc_ue_size = u32::from_le_bytes(<[u8; 4]>::try_from(&buf[2..6]).unwrap()) as usize;
-            // read a 4 byte uncompressed encoded size
-            let uc_enc_size = u32::from_le_bytes(<[u8; 4]>::try_from(&buf[6..10]).unwrap()) as usize;
-            // read a 4 byte compressed encoded size
-            let comp_enc_size = u32::from_le_bytes(<[u8; 4]>::try_from(&buf[10..14]).unwrap()) as usize;
-            // read the compressed encoded data
-            frame.checkpoint_raw_bytes.resize(comp_enc_size, 0);
-            rply.read_exact(frame.checkpoint_raw_bytes.as_mut_slice())?;
-            // maybe decompress
-            match compression {
-                Compression::None => {},
-                Compression::Zlib => {
-                    use flate2::bufread::ZlibDecoder;
-                    frame.checkpoint_uncompressed_raw_bytes.resize(uc_enc_size, 0);
-                    let mut decoder = ZlibDecoder::new(rply);
-                    std::io::copy(&mut decoder, &mut std::io::Cursor::new(frame.checkpoint_uncompressed_raw_bytes.as_mut_slice()))?;
-                },
-                Compression::Zstd => {
-                    use zstd::Decoder;
-                    frame.checkpoint_uncompressed_raw_bytes.resize(uc_enc_size, 0);
-                    let mut decoder = Decoder::with_buffer(rply)?.single_frame();
-                    std::io::copy(&mut decoder, &mut std::io::Cursor::new(frame.checkpoint_uncompressed_raw_bytes.as_mut_slice()))?;
-                    decoder.finish();
-                },
-            };
-            // maybe decode
-            match encoding {
-                Encoding::Raw => {},
-                Encoding::Statestream => {
-                    frame.checkpoint_uncompressed_unencoded_bytes.resize(uc_ue_size, 0);
-                    // statestream_decode(frame.checkpoint_decompressed_data().unwrap(), &mut frame.checkpoint_uncompressed_unencoded_bytes);
-                },
-            }
-        }
-    }
-    Ok(())
 }
