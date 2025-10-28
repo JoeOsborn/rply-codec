@@ -187,9 +187,7 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
         let checkpoint_commit_threshold = ((cp_config >> 16) & 0xFF) as u8;
         let checkpoint_compression = Compression::try_from(((cp_config >> 8) & 0xFF) as u8)
             .map_err(ReplayError::Compression)?;
-        rply.read_exact(initial_state.as_mut_slice())?;
-        // TODO: decode if version is 2
-        Ok(ReplayDecoder {
+        let mut replay = ReplayDecoder {
             rply,
             initial_state,
             header: Header::V2(HeaderV2 {
@@ -203,7 +201,13 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
             }),
             frame_number: 0,
             ss_state: statestream::Ctx::new(block_size, superblock_size),
-        })
+        };
+        if replay.header.version() == 1 {
+            replay.rply.read_exact(&mut replay.initial_state)?;
+        } else {
+            replay.decode_initial_checkpoint()?;
+        }
+        Ok(replay)
     }
 
     /// Reads a single frame at the current decoder position.
@@ -284,13 +288,20 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
                 rply.read_exact(frame.checkpoint_bytes.as_mut_slice())?;
             }
             FrameToken::Checkpoint2 => {
-                self.decode_checkpoint(frame)?;
+                self.decode_checkpoint(&mut frame.checkpoint_bytes)?;
             }
         }
         Ok(())
     }
 
-    fn decode_checkpoint(&mut self, frame: &mut Frame) -> Result<()> {
+    fn decode_initial_checkpoint(&mut self) -> Result<()> {
+        let mut initial_state = std::mem::take(&mut self.initial_state);
+        self.decode_checkpoint(&mut initial_state)?;
+        self.initial_state = initial_state;
+        Ok(())
+    }
+
+    fn decode_checkpoint(&mut self, checkpoint_bytes: &mut Vec<u8>) -> Result<()> {
         use byteorder::{LittleEndian, ReadBytesExt};
         let rply = &mut *self.rply;
         // read a 1 byte compression code
@@ -306,18 +317,18 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
         // read a 4 byte compressed encoded size
         #[expect(unused)]
         let comp_enc_size = rply.read_u32::<LittleEndian>()? as usize;
-        frame.checkpoint_bytes.resize(uc_ue_size, 0);
+        checkpoint_bytes.resize(uc_ue_size, 0);
         // maybe decompress
         match (compression, encoding) {
             (Compression::None, Encoding::Raw) => {
-                rply.read_exact(frame.checkpoint_bytes.as_mut_slice())?;
+                rply.read_exact(checkpoint_bytes.as_mut_slice())?;
             }
             (Compression::None, Encoding::Statestream) => {
                 let mut ss_decoder =
                     statestream::Decoder::new(rply, &mut self.ss_state, uc_ue_size);
                 std::io::copy(
                     &mut ss_decoder,
-                    &mut std::io::Cursor::new(frame.checkpoint_bytes.as_mut_slice()),
+                    &mut std::io::Cursor::new(checkpoint_bytes.as_mut_slice()),
                 )?;
             }
             (Compression::Zlib, Encoding::Raw) => {
@@ -325,7 +336,7 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
                 let mut decoder = ZlibDecoder::new(rply);
                 std::io::copy(
                     &mut decoder,
-                    &mut std::io::Cursor::new(frame.checkpoint_bytes.as_mut_slice()),
+                    &mut std::io::Cursor::new(checkpoint_bytes.as_mut_slice()),
                 )?;
             }
             (Compression::Zlib, Encoding::Statestream) => {
@@ -335,7 +346,7 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
                     statestream::Decoder::new(&mut decoder, &mut self.ss_state, uc_ue_size);
                 std::io::copy(
                     &mut ss_decoder,
-                    &mut std::io::Cursor::new(frame.checkpoint_bytes.as_mut_slice()),
+                    &mut std::io::Cursor::new(checkpoint_bytes.as_mut_slice()),
                 )?;
             }
             (Compression::Zstd, Encoding::Raw) => {
@@ -343,7 +354,7 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
                 let mut decoder = Decoder::with_buffer(rply)?.single_frame();
                 std::io::copy(
                     &mut decoder,
-                    &mut std::io::Cursor::new(frame.checkpoint_bytes.as_mut_slice()),
+                    &mut std::io::Cursor::new(checkpoint_bytes.as_mut_slice()),
                 )?;
             }
             (Compression::Zstd, Encoding::Statestream) => {
@@ -353,7 +364,7 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
                     statestream::Decoder::new(&mut decoder, &mut self.ss_state, uc_ue_size);
                 std::io::copy(
                     &mut ss_decoder,
-                    &mut std::io::Cursor::new(frame.checkpoint_bytes.as_mut_slice()),
+                    &mut std::io::Cursor::new(checkpoint_bytes.as_mut_slice()),
                 )?;
             }
         }
