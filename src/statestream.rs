@@ -203,3 +203,22 @@ impl<R: std::io::Read> std::io::Read for Decoder<'_, '_, R> {
         self.readout(outbuf)
     }
 }
+
+pub(crate) struct Encoder<'w, 'c, W: std::io::Write> {
+    writer: &'w mut W,
+    ctx: &'c mut Ctx,
+}
+
+impl<'w, 'c, W: std::io::Write> Encoder<'w, 'c, W> {
+    pub(crate) fn new(writer: &'w mut W, ctx: &'c mut Ctx) -> Self {
+        Self { writer, ctx }
+    }
+    pub fn encode_checkpoint(mut self, checkpoint: &[u8], frame: u64) -> std::io::Result<u32> {
+        use rmp::encode as r;
+        r::write_uint(&mut self.writer, u64::from(u8::from(SSToken::Start)))?;
+        r::write_uint(&mut self.writer, frame)?;
+        todo!();
+
+        Ok(0)
+    }
+}
