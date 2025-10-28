@@ -26,6 +26,17 @@ impl TryFrom<u8> for SSToken {
     }
 }
 
+impl From<SSToken> for u8 {
+    fn from(value: SSToken) -> Self {
+        match value {
+            SSToken::Start => 0,
+            SSToken::NewBlock => 1,
+            SSToken::NewSuperblock => 2,
+            SSToken::SuperblockSeq => 3,
+        }
+    }
+}
+
 pub(crate) struct Ctx {
     block_size: u32,
     superblock_size: u32,
