@@ -137,7 +137,7 @@ pub struct ReplayDecoder<'a, R: std::io::BufRead> {
     rply: &'a mut R,
     pub header: Header,
     pub initial_state: Vec<u8>,
-    pub frame_number: usize,
+    pub frame_number: u64,
     ss_state: statestream::Ctx,
 }
 
@@ -291,6 +291,7 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
                 self.decode_checkpoint(&mut frame.checkpoint_bytes)?;
             }
         }
+        self.frame_number += 1;
         Ok(())
     }
 
@@ -388,6 +389,13 @@ impl Header {
             Header::V2(header_v2) => header_v2.base.version,
         }
     }
+    #[must_use]
+    pub fn frame_count(&self) -> Option<u64> {
+        match self {
+            Header::V0V1(_) => None,
+            Header::V2(header_v2) => Some(u64::from(header_v2.frame_count)),
+        }
+    }
 }
 #[derive(Debug, Default)]
 pub struct KeyData {
@@ -409,9 +417,25 @@ pub struct InputData {
 pub struct Frame {
     pub key_events: Vec<KeyData>,
     pub input_events: Vec<InputData>,
-    checkpoint_bytes: Vec<u8>,
+    pub checkpoint_bytes: Vec<u8>,
     pub checkpoint_compression: Compression,
     pub checkpoint_encoding: Encoding,
+}
+
+impl Frame {
+    #[must_use]
+    pub fn inputs(&self) -> String {
+        use std::fmt::Write;
+        let mut output = String::new();
+        for i in 0..self.input_events.len() {
+            let evt = &self.input_events[i];
+            write!(output, "{:03}:{:016b}", evt.id, evt.val).unwrap();
+            if i + 1 < self.input_events.len() {
+                write!(output, "--").unwrap();
+            }
+        }
+        output
+    }
 }
 
 impl Default for Frame {

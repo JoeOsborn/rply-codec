@@ -170,11 +170,12 @@ impl<R: std::io::Read> std::io::Read for Decoder<'_, '_, R> {
                         r::read_array_len(self.reader).map_err(std::io::Error::other)? as usize;
                     let block_byte_size = self.ctx.block_size as usize;
                     let superblock_byte_size = self.ctx.superblock_size as usize * block_byte_size;
+                    let mut superseq = vec![0; arr_len];
                     self.ctx.last_state.resize(self.state_size, 0);
-                    for superblock_i in 0..arr_len {
+                    for (superblock_i, superseq_sblk) in superseq.iter_mut().enumerate() {
                         let superblock_idx =
                             r::read_int(self.reader).map_err(std::io::Error::other)?;
-                        self.ctx.last_superseq[superblock_i] = superblock_idx;
+                        *superseq_sblk = superblock_idx;
                         let superblock_data = self.ctx.superblock_index.get(superblock_idx);
                         for (block_i, block_id) in superblock_data.iter().copied().enumerate() {
                             let block_start = (superblock_i * superblock_byte_size
@@ -190,7 +191,9 @@ impl<R: std::io::Read> std::io::Read for Decoder<'_, '_, R> {
                                 .copy_from_slice(&block_bytes[0..(block_end - block_start)]);
                         }
                     }
+                    self.ctx.last_superseq = superseq;
                     state = State::Finished;
+                    self.finished = true;
                     break;
                 }
                 (s, tok) => return Err(std::io::Error::other(SSError::ParseError(s, tok))),

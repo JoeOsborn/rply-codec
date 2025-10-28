@@ -9,6 +9,23 @@ fn main() {
     let header = &rply.header;
     println!("{header:?}");
     let mut frame = Frame::default();
-    rply.read_frame(&mut frame).unwrap();
-    println!("{frame:?}");
+    while let Ok(()) = rply
+        .read_frame(&mut frame)
+        .inspect_err(|e| println!("Err: {e}"))
+    {
+        println!(
+            " {}{:08} {}",
+            if frame.checkpoint_bytes.is_empty() {
+                " "
+            } else {
+                "*"
+            },
+            rply.frame_number,
+            frame.inputs(),
+        );
+        if Some(rply.frame_number) == rply.header.frame_count() {
+            println!("Done!");
+            break;
+        }
+    }
 }
