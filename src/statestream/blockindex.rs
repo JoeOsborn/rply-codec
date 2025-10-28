@@ -18,6 +18,7 @@ pub(crate) struct BlockIndex<
     object_size: usize,
 }
 
+#[expect(unused)]
 pub(crate) struct Insertion {
     index: u32,
     is_new: bool,
@@ -42,7 +43,9 @@ impl<T: bytemuck::Zeroable + bytemuck::AnyBitPattern + bytemuck::NoUninit + Part
             hashes: vec![zero_hash],
         }
     }
+    #[expect(unused)]
     pub fn insert(&mut self, obj: &[T], _frame: u64) -> Insertion {
+        assert_eq!(obj.len(), self.object_size);
         let hash = hash(obj);
         match self.index.entry(hash) {
             std::collections::hash_map::Entry::Occupied(mut e) => {
@@ -81,6 +84,7 @@ impl<T: bytemuck::Zeroable + bytemuck::AnyBitPattern + bytemuck::NoUninit + Part
         }
     }
     pub fn insert_exact(&mut self, idx: u32, obj: Box<[T]>, _frame: u64) -> bool {
+        assert_eq!(obj.len(), self.object_size);
         if self.objects.len() != idx as usize {
             return false;
         }
@@ -88,17 +92,19 @@ impl<T: bytemuck::Zeroable + bytemuck::AnyBitPattern + bytemuck::NoUninit + Part
         self.index.entry(hash).or_default().push(idx);
         self.objects.push(obj);
         self.hashes.push(hash);
-        return true;
+        true
     }
     pub fn get(&self, which: u32) -> &[T] {
         &self.objects[which as usize]
     }
+    #[expect(unused)]
     pub fn clear(&mut self) {
         self.index.clear();
         self.objects.truncate(1);
         self.hashes.truncate(1);
         self.index.insert(self.hashes[0], smallvec![0]);
     }
+    #[expect(unused)]
     pub fn len(&self) -> usize {
         self.objects.len()
     }

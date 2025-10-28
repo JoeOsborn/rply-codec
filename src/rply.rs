@@ -1,13 +1,5 @@
-use crate::statestream;
+use crate::{InvalidDeterminant, statestream};
 use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub struct InvalidDeterminant(pub u8);
-impl std::fmt::Display for InvalidDeterminant {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
 
 // #[repr(usize)]
 // pub enum HeaderV0V1Part {
@@ -48,29 +40,6 @@ impl From<u8> for FrameToken {
             b'c' => FrameToken::Checkpoint,
             b'C' => FrameToken::Checkpoint2,
             _ => FrameToken::Invalid,
-        }
-    }
-}
-
-#[repr(u8)]
-#[non_exhaustive]
-#[derive(Debug)]
-pub enum SSToken {
-    Start = 0,
-    NewBlock = 1,
-    NewSuperblock = 2,
-    SuperblockSeq = 3,
-}
-impl TryFrom<u8> for SSToken {
-    type Error = InvalidDeterminant;
-
-    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
-        match value {
-            0 => Ok(SSToken::Start),
-            1 => Ok(SSToken::NewBlock),
-            2 => Ok(SSToken::NewSuperblock),
-            3 => Ok(SSToken::SuperblockSeq),
-            _ => Err(InvalidDeterminant(value)),
         }
     }
 }
@@ -332,8 +301,10 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
         // read a 4 byte uncompressed unencoded size
         let uc_ue_size = rply.read_u32::<LittleEndian>()? as usize;
         // read a 4 byte uncompressed encoded size
+        #[expect(unused)]
         let uc_enc_size = rply.read_u32::<LittleEndian>()? as usize;
         // read a 4 byte compressed encoded size
+        #[expect(unused)]
         let comp_enc_size = rply.read_u32::<LittleEndian>()? as usize;
         frame.checkpoint_bytes.resize(uc_ue_size, 0);
         // maybe decompress
@@ -342,7 +313,8 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
                 rply.read_exact(frame.checkpoint_bytes.as_mut_slice())?;
             }
             (Compression::None, Encoding::Statestream) => {
-                let mut ss_decoder = statestream::Decoder::new(rply, &mut self.ss_state);
+                let mut ss_decoder =
+                    statestream::Decoder::new(rply, &mut self.ss_state, uc_ue_size);
                 std::io::copy(
                     &mut ss_decoder,
                     &mut std::io::Cursor::new(frame.checkpoint_bytes.as_mut_slice()),
@@ -359,7 +331,8 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
             (Compression::Zlib, Encoding::Statestream) => {
                 use flate2::bufread::ZlibDecoder;
                 let mut decoder = ZlibDecoder::new(rply);
-                let mut ss_decoder = statestream::Decoder::new(&mut decoder, &mut self.ss_state);
+                let mut ss_decoder =
+                    statestream::Decoder::new(&mut decoder, &mut self.ss_state, uc_ue_size);
                 std::io::copy(
                     &mut ss_decoder,
                     &mut std::io::Cursor::new(frame.checkpoint_bytes.as_mut_slice()),
@@ -376,7 +349,8 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
             (Compression::Zstd, Encoding::Statestream) => {
                 use zstd::Decoder;
                 let mut decoder = Decoder::with_buffer(rply)?.single_frame();
-                let mut ss_decoder = statestream::Decoder::new(&mut decoder, &mut self.ss_state);
+                let mut ss_decoder =
+                    statestream::Decoder::new(&mut decoder, &mut self.ss_state, uc_ue_size);
                 std::io::copy(
                     &mut ss_decoder,
                     &mut std::io::Cursor::new(frame.checkpoint_bytes.as_mut_slice()),

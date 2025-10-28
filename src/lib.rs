@@ -2,6 +2,14 @@ mod rply;
 mod statestream;
 pub use rply::*;
 
+#[derive(Debug, thiserror::Error)]
+pub struct InvalidDeterminant(pub u8);
+impl std::fmt::Display for InvalidDeterminant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
