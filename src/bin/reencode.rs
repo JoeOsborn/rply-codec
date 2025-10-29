@@ -4,7 +4,7 @@ fn main() {
     let args: Vec<_> = std::env::args().collect();
     let file =
         std::fs::File::open(args.get(1).unwrap_or(&"examples/bobl.replay".to_string())).unwrap();
-    let outfile = std::fs::File::open(
+    let outfile = std::fs::File::create(
         args.get(2)
             .unwrap_or(&"examples/bobl_smallblocks.replay".to_string()),
     )
@@ -41,4 +41,5 @@ fn main() {
     out.finish().unwrap();
     assert_eq!(out.frame_number, rply.frame_number);
     assert_eq!(out.header.frame_count(), rply.header.frame_count());
+    assert_eq!(out.header.frame_count(), Some(out.frame_number));
 }

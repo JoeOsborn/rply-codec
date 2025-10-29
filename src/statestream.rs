@@ -256,6 +256,9 @@ impl<'w, 'c, W: std::io::Write> Encoder<'w, 'c, W> {
         let superblock_size = self.ctx.superblock_size as usize;
         let superblock_size_bytes = block_size * superblock_size;
         let superblock_count = ((checkpoint.len() - 1) / superblock_size_bytes) + 1;
+        self.ctx
+            .last_superseq
+            .resize(superblock_count.max(self.ctx.last_superseq.len()), 0);
         let mut superblock_contents = vec![0_u32; superblock_size];
         for (superblock_i, superblock_bytes) in checkpoint.chunks(superblock_size_bytes).enumerate()
         {
@@ -306,6 +309,7 @@ impl<'w, 'c, W: std::io::Write> Encoder<'w, 'c, W> {
                 }
             }
         }
+        self.ctx.last_superseq.truncate(superblock_count);
         bytes_out += rmp_size(r::write_uint(
             self.writer,
             u64::from(u8::from(SSToken::SuperblockSeq)),

@@ -154,6 +154,8 @@ pub enum ReplayError {
     Encoding(InvalidDeterminant),
     #[error("I/O Error")]
     IO(#[from] std::io::Error),
+    #[error("Too many frames to {0} fit framecount header")]
+    TooManyFrames(std::num::TryFromIntError),
     #[error("Coreless frame read for version 0 not possible")]
     NoCoreRead(),
     #[error("Checkpoint too big {0}")]
@@ -421,7 +423,7 @@ pub fn decode<R: std::io::BufRead>(rply: &mut R) -> Result<ReplayDecoder<'_, R>>
 pub struct ReplayEncoder<'a, W: std::io::Write + std::io::Seek> {
     rply: &'a mut W,
     pub header: Header,
-    pub initial_state: Vec<u8>,
+    // pub initial_state: Vec<u8>,
     pub frame_number: u64,
     last_pos: u64,
     ss_state: statestream::Ctx,
@@ -447,7 +449,6 @@ impl<'w, W: std::io::Write + std::io::Seek> ReplayEncoder<'w, W> {
         let mut replay = ReplayEncoder {
             rply,
             header,
-            initial_state: vec![],
             frame_number: 0,
             last_pos: 0,
             ss_state,
@@ -475,6 +476,10 @@ impl<'w, W: std::io::Write + std::io::Seek> ReplayEncoder<'w, W> {
             .write_u32::<LittleEndian>(self.header.initial_state_size())?;
         self.rply
             .write_u64::<LittleEndian>(self.header.identifier())?;
+        self.rply.write_u32::<LittleEndian>(
+            u32::try_from(self.header.frame_count().unwrap())
+                .map_err(ReplayError::TooManyFrames)?,
+        )?;
         self.rply
             .write_u32::<LittleEndian>(self.header.block_size())?;
         self.rply
@@ -567,15 +572,17 @@ impl<'w, W: std::io::Write + std::io::Seek> ReplayEncoder<'w, W> {
         Ok(())
     }
     fn encode_initial_checkpoint(&mut self, checkpoint: &[u8]) -> Result<()> {
-        let initial = std::mem::take(&mut self.initial_state);
+        // let initial = std::mem::take(&mut self.initial_state);
         let old_pos = self.rply.stream_position()?;
         self.rply
             .seek(std::io::SeekFrom::Start(HEADERV2_LEN_BYTES as u64))?;
         self.encode_checkpoint(checkpoint, 0)?;
+        let encoded_size = self.rply.stream_position()? - HEADERV2_LEN_BYTES as u64;
         self.header.set_initial_state_size(
-            u32::try_from(initial.len()).map_err(ReplayError::CheckpointTooBig)?,
+            u32::try_from(encoded_size).map_err(ReplayError::CheckpointTooBig)?,
         );
-        self.initial_state = initial;
+        // self.initial_state = initial;
+        // dbg!("initial state size", self.header.initial_state_size());
         // Have to rewrite header to account for initial state size
         self.write_header()?;
         self.last_pos = self.rply.stream_position()?;
