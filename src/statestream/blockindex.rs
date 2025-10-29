@@ -18,10 +18,9 @@ pub(crate) struct BlockIndex<
     object_size: usize,
 }
 
-#[expect(unused)]
 pub(crate) struct Insertion {
-    index: u32,
-    is_new: bool,
+    pub index: u32,
+    pub is_new: bool,
 }
 
 fn hash<T: bytemuck::AnyBitPattern + bytemuck::NoUninit>(val: &[T]) -> u64 {
@@ -43,7 +42,6 @@ impl<T: bytemuck::Zeroable + bytemuck::AnyBitPattern + bytemuck::NoUninit + Part
             hashes: vec![zero_hash],
         }
     }
-    #[expect(unused)]
     pub fn insert(&mut self, obj: &[T], _frame: u64) -> Insertion {
         assert_eq!(obj.len(), self.object_size);
         let hash = hash(obj);

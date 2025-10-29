@@ -572,7 +572,9 @@ impl<'w, W: std::io::Write + std::io::Seek> ReplayEncoder<'w, W> {
         self.rply
             .seek(std::io::SeekFrom::Start(HEADERV2_LEN_BYTES as u64))?;
         self.encode_checkpoint(checkpoint, 0)?;
-        self.header.set_initial_state_size(initial.len() as u32);
+        self.header.set_initial_state_size(
+            u32::try_from(initial.len()).map_err(ReplayError::CheckpointTooBig)?,
+        );
         self.initial_state = initial;
         // Have to rewrite header to account for initial state size
         self.write_header()?;
@@ -580,7 +582,13 @@ impl<'w, W: std::io::Write + std::io::Seek> ReplayEncoder<'w, W> {
         self.rply.seek(std::io::SeekFrom::Start(old_pos))?;
         Ok(())
     }
+
     /// Writes a single frame at the current encoder position.
+    /// # Errors
+    /// [`ReplayError::FrameTooLong`]: Frame encoded to more than 2^32 bytes, backrefs invalid
+    /// [`ReplayError::TooManyKeyEvents`]: More key events than allowed by spec
+    /// [`ReplayError::TooManyInputEvents`]: More input events than allowed by spec
+    /// [`ReplayError::CheckpointTooBig`]: Checkpoint data takes up more than 2^32 bytes
     pub fn write_frame(&mut self, frame: &Frame) -> Result<()> {
         use byteorder::{LittleEndian, WriteBytesExt};
         let start_pos = self.rply.stream_position()?;
@@ -619,6 +627,8 @@ impl<'w, W: std::io::Write + std::io::Seek> ReplayEncoder<'w, W> {
         Ok(())
     }
     /// Finishes the encoding, writing the header in the process
+    /// # Errors
+    /// [`ReplayError::IO`]: Underlying writer fails to write header
     pub fn finish(&mut self) -> Result<()> {
         if self.finished {
             return Ok(());
@@ -639,9 +649,9 @@ impl<W: std::io::Write + std::io::Seek> Drop for ReplayEncoder<'_, W> {
 ///
 /// # Errors
 /// See [`ReplayEncoder::new`].
-pub fn encode<'w, 's, W: std::io::Write + std::io::Seek>(
+pub fn encode<'w, W: std::io::Write + std::io::Seek>(
     header: Header,
-    initial_state: &'s [u8],
+    initial_state: &[u8],
     rply: &'w mut W,
 ) -> Result<ReplayEncoder<'w, W>> {
     ReplayEncoder::new(header, initial_state, rply)
