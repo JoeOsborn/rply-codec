@@ -1,5 +1,7 @@
+mod clock;
 mod rply;
 mod statestream;
+pub use clock::{Counter, Timer, Times, counts, stats};
 pub use rply::*;
 
 #[derive(Debug, thiserror::Error)]

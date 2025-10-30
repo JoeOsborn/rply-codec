@@ -1,5 +1,8 @@
 mod blockindex;
-use crate::InvalidDeterminant;
+use crate::{
+    InvalidDeterminant,
+    clock::{self, Counter, Timer},
+};
 use blockindex::BlockIndex;
 use std::io::Write;
 
@@ -125,6 +128,7 @@ impl<R: std::io::Read> std::io::Read for Decoder<'_, '_, R> {
             }
             return self.readout(outbuf);
         }
+        let stopwatch = clock::time(Timer::DecodeStatestream);
         let mut frame = 0;
         let mut state = State::WaitForStart;
         let mut buf = vec![0_u8; self.ctx.block_size as usize];
@@ -148,6 +152,7 @@ impl<R: std::io::Read> std::io::Read for Decoder<'_, '_, R> {
                         return Err(std::io::Error::other(SSError::BlockWrongSize(bin_len)));
                     }
                     self.reader.read_exact(&mut buf)?;
+                    // hashes += 1;
                     if !self
                         .ctx
                         .block_index
@@ -166,6 +171,7 @@ impl<R: std::io::Read> std::io::Read for Decoder<'_, '_, R> {
                         *superblock_elt =
                             r::read_int(self.reader).map_err(std::io::Error::other)?;
                     }
+                    // hashes += 1;
                     if !self.ctx.superblock_index.insert_exact(
                         idx,
                         Box::from(superblock.clone()),
@@ -211,6 +217,7 @@ impl<R: std::io::Read> std::io::Read for Decoder<'_, '_, R> {
             }
         }
         assert_eq!(state, State::Finished);
+        drop(stopwatch);
         self.readout(outbuf)
     }
 }
@@ -245,6 +252,8 @@ impl<'w, 'c, W: std::io::Write> Encoder<'w, 'c, W> {
     }
     pub fn encode_checkpoint(mut self, checkpoint: &[u8], frame: u64) -> std::io::Result<u32> {
         use rmp::encode as r;
+        let stopwatch = clock::time(Timer::EncodeStatestream);
+        clock::count(Counter::EncTotalKBsIn, (checkpoint.len() / 1024) as u64);
         let mut bytes_out = 0;
         bytes_out += rmp_size(r::write_uint(
             &mut self.writer,
@@ -256,6 +265,14 @@ impl<'w, 'c, W: std::io::Write> Encoder<'w, 'c, W> {
         let superblock_size = self.ctx.superblock_size as usize;
         let superblock_size_bytes = block_size * superblock_size;
         let superblock_count = ((checkpoint.len() - 1) / superblock_size_bytes) + 1;
+        clock::count(Counter::EncTotalSuperblocks, superblock_count as u64);
+        clock::count(
+            Counter::EncTotalBlocks,
+            (((checkpoint.len() - 1) / block_size) + 1) as u64,
+        );
+        let mut reused_blocks = 0;
+        let mut reused_superblocks = 0;
+        let mut hashes = 0;
         self.ctx
             .last_superseq
             .resize(superblock_count.max(self.ctx.last_superseq.len()), 0);
@@ -272,8 +289,10 @@ impl<'w, 'c, W: std::io::Write> Encoder<'w, 'c, W> {
                 let found_block = if block_bytes.len() < block_size {
                     padded_block[block_bytes.len()..].fill(0);
                     padded_block[..block_bytes.len()].copy_from_slice(block_bytes);
+                    hashes += 1;
                     self.ctx.block_index.insert(&padded_block, frame)
                 } else {
+                    hashes += 1;
                     self.ctx.block_index.insert(block_bytes, frame)
                 };
                 superblock_contents[block_i] = found_block.index;
@@ -288,8 +307,11 @@ impl<'w, 'c, W: std::io::Write> Encoder<'w, 'c, W> {
                     bytes_out += rmp_size(r::write_bin_len(self.writer, self.ctx.block_size)?);
                     self.writer.write_all(block_out_bytes)?;
                     bytes_out += block_out_bytes.len();
+                } else {
+                    reused_blocks += 1;
                 }
             }
+            hashes += 1;
             let found_superblock = self
                 .ctx
                 .superblock_index
@@ -308,8 +330,13 @@ impl<'w, 'c, W: std::io::Write> Encoder<'w, 'c, W> {
                 for blkid in &superblock_contents {
                     bytes_out += rmp_size(r::write_uint(self.writer, u64::from(*blkid))?);
                 }
+            } else {
+                reused_superblocks += 1;
             }
         }
+        clock::count(Counter::EncReusedBlocks, reused_blocks);
+        clock::count(Counter::EncReusedSuperblocks, reused_superblocks);
+        clock::count(Counter::EncHashes, hashes);
         self.ctx.last_superseq.truncate(superblock_count);
         bytes_out += rmp_size(r::write_uint(
             self.writer,
@@ -323,7 +350,8 @@ impl<'w, 'c, W: std::io::Write> Encoder<'w, 'c, W> {
         for super_id in &self.ctx.last_superseq {
             bytes_out += rmp_size(r::write_uint(self.writer, u64::from(*super_id))?);
         }
-        // commit
+        drop(stopwatch);
+        clock::count(Counter::EncTotalKBsOut, (bytes_out / 1024) as u64);
         u32::try_from(bytes_out)
             .map_err(|e| std::io::Error::other(crate::ReplayError::CheckpointTooBig(e)))
     }

@@ -1,6 +1,10 @@
 use std::io::Write;
 
-use crate::{InvalidDeterminant, statestream};
+use crate::{
+    InvalidDeterminant,
+    clock::{self, Timer},
+    statestream,
+};
 use thiserror::Error;
 
 // #[repr(usize)]
@@ -260,6 +264,7 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
     #[allow(clippy::too_many_lines)]
     pub fn read_frame(&mut self, frame: &mut Frame) -> Result<()> {
         use byteorder::{LittleEndian, ReadBytesExt};
+        let stopwatch = clock::time(Timer::DecodeFrame);
         let vsn = self.header.version();
         let rply = &mut *self.rply;
         if vsn == 0 {
@@ -331,6 +336,7 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
             }
         }
         self.frame_number += 1;
+        drop(stopwatch);
         Ok(())
     }
 
@@ -343,6 +349,7 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
 
     fn decode_checkpoint(&mut self, checkpoint_bytes: &mut Vec<u8>) -> Result<()> {
         use byteorder::{LittleEndian, ReadBytesExt};
+        let stopwatch = clock::time(Timer::DecodeCheckpoint);
         let rply = &mut *self.rply;
         // read a 1 byte compression code
         let compression =
@@ -408,6 +415,7 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
                 )?;
             }
         }
+        drop(stopwatch);
         Ok(())
     }
 }
@@ -494,6 +502,7 @@ impl<'w, W: std::io::Write + std::io::Seek> ReplayEncoder<'w, W> {
     }
     fn encode_checkpoint(&mut self, checkpoint: &[u8], frame: u64) -> Result<()> {
         use byteorder::{LittleEndian, WriteBytesExt};
+        let stopwatch = clock::time(Timer::EncodeCheckpoint);
         let compression = self.header.checkpoint_compression();
         let encoding = Encoding::Statestream;
         self.rply.write_u8(u8::from(compression))?;
@@ -568,6 +577,7 @@ impl<'w, W: std::io::Write + std::io::Seek> ReplayEncoder<'w, W> {
         // write encoded compressed bytes
         self.rply.write_u32::<LittleEndian>(compressed_size)?;
         self.rply.seek(std::io::SeekFrom::Start(end_pos))?;
+        drop(stopwatch);
         Ok(())
     }
     fn encode_initial_checkpoint(&mut self, checkpoint: &[u8]) -> Result<()> {
@@ -592,6 +602,7 @@ impl<'w, W: std::io::Write + std::io::Seek> ReplayEncoder<'w, W> {
     /// [`ReplayError::CheckpointTooBig`]: Checkpoint data takes up more than 2^32 bytes
     pub fn write_frame(&mut self, frame: &Frame) -> Result<()> {
         use byteorder::{LittleEndian, WriteBytesExt};
+        let stopwatch = clock::time(Timer::EncodeFrame);
         let start_pos = self.rply.stream_position()?;
         self.rply.write_u32::<LittleEndian>(
             u32::try_from(start_pos - self.last_pos).map_err(ReplayError::FrameTooLong)?,
@@ -625,6 +636,7 @@ impl<'w, W: std::io::Write + std::io::Seek> ReplayEncoder<'w, W> {
         }
         self.frame_number += 1;
         self.last_pos = start_pos;
+        drop(stopwatch);
         Ok(())
     }
     /// Finishes the encoding, writing the header in the process

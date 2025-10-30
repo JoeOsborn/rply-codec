@@ -1,4 +1,4 @@
-use rply_codec::{Frame, decode, encode};
+use rply_codec::{Counter, Frame, Timer, counts, decode, encode, stats};
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
@@ -16,6 +16,7 @@ fn main() {
     println!("{header:?}");
     let mut header_out = header.clone();
     header_out.set_block_size(64);
+    header_out.set_superblock_size(32);
     let mut out = encode(header_out, &rply.initial_state, &mut outfile).unwrap();
     let mut frame = Frame::default();
     while let Ok(()) = rply
@@ -42,4 +43,32 @@ fn main() {
     assert_eq!(out.frame_number, rply.frame_number);
     assert_eq!(out.header.frame_count(), rply.header.frame_count());
     assert_eq!(out.header.frame_count(), Some(out.frame_number));
+    for timer in [
+        Timer::DecodeFrame,
+        Timer::DecodeCheckpoint,
+        Timer::DecodeStatestream,
+        Timer::EncodeStatestream,
+        Timer::EncodeCheckpoint,
+        Timer::EncodeStatestream,
+    ] {
+        let times = stats(timer);
+        println!(
+            "{timer:?}: {} ({:.8}ms avg)",
+            times.count,
+            ((times.micros as f64 / times.count as f64) / 1000.0)
+        );
+    }
+    for counter in [
+        Counter::EncReusedBlocks,
+        Counter::EncReusedSuperblocks,
+        Counter::EncSkippedBlocks,
+        Counter::EncMemCmps,
+        Counter::EncHashes,
+        Counter::EncTotalBlocks,
+        Counter::EncTotalSuperblocks,
+        Counter::EncTotalKBsIn,
+        Counter::EncTotalKBsOut,
+    ] {
+        println!("{counter:?}: {}", counts(counter));
+    }
 }
