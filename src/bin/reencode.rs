@@ -15,6 +15,7 @@ fn main() {
     let header = &rply.header;
     println!("{header:?}");
     let mut header_out = header.clone();
+    header_out.upgrade();
     header_out.set_block_size(128);
     header_out.set_superblock_size(128);
     let mut out = encode(header_out, &rply.initial_state, &mut outfile).unwrap();
