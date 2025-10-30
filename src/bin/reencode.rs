@@ -15,8 +15,8 @@ fn main() {
     let header = &rply.header;
     println!("{header:?}");
     let mut header_out = header.clone();
-    header_out.set_block_size(64);
-    header_out.set_superblock_size(32);
+    header_out.set_block_size(128);
+    header_out.set_superblock_size(128);
     let mut out = encode(header_out, &rply.initial_state, &mut outfile).unwrap();
     let mut frame = Frame::default();
     while let Ok(()) = rply
@@ -47,7 +47,7 @@ fn main() {
         Timer::DecodeFrame,
         Timer::DecodeCheckpoint,
         Timer::DecodeStatestream,
-        Timer::EncodeStatestream,
+        Timer::EncodeFrame,
         Timer::EncodeCheckpoint,
         Timer::EncodeStatestream,
     ] {
@@ -57,6 +57,8 @@ fn main() {
         println!("{timer:?}: {} ({avg_time:.8}ms avg)", times.count,);
     }
     for counter in [
+        Counter::DecSkippedSuperblocks,
+        Counter::DecSkippedBlocks,
         Counter::EncReusedBlocks,
         Counter::EncReusedSuperblocks,
         Counter::EncSkippedBlocks,

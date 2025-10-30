@@ -23,6 +23,8 @@ pub enum Counter {
     EncTotalSuperblocks,
     EncTotalKBsIn,
     EncTotalKBsOut,
+    DecSkippedSuperblocks,
+    DecSkippedBlocks,
     Count,
 }
 static TIME_ACC: [AtomicU64; Timer::Count as usize] = [
@@ -42,6 +44,8 @@ static TIME_COUNTS: [AtomicU64; Timer::Count as usize] = [
     AtomicU64::new(0),
 ];
 static COUNTS: [AtomicU64; Counter::Count as usize] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
     AtomicU64::new(0),
