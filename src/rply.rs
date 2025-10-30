@@ -825,6 +825,11 @@ impl Frame {
         }
         output
     }
+    pub fn drop_checkpoint(&mut self) {
+        self.checkpoint_bytes.clear();
+        self.checkpoint_compression = Compression::None;
+        self.checkpoint_encoding = Encoding::Raw;
+    }
 }
 
 impl Default for Frame {

@@ -14,6 +14,10 @@ fn main() {
     let mut rply = decode(&mut file).unwrap();
     let header = &rply.header;
     println!("{header:?}");
+    if header.version() == 0 {
+        println!("Can't upgrade v0 replays without a core");
+        std::process::exit(-1);
+    }
     let mut header_out = header.clone();
     header_out.upgrade();
     header_out.set_block_size(128);
@@ -34,9 +38,9 @@ fn main() {
             rply.frame_number,
             frame.inputs(),
         );
+        //frame.drop_checkpoint();
         out.write_frame(&frame).unwrap();
         if Some(rply.frame_number) == rply.header.frame_count() {
-            println!("Done!");
             break;
         }
     }
