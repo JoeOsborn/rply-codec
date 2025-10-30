@@ -250,6 +250,7 @@ impl<'w, 'c, W: std::io::Write> Encoder<'w, 'c, W> {
     pub(crate) fn new(writer: &'w mut W, ctx: &'c mut Ctx) -> Self {
         Self { writer, ctx }
     }
+    #[allow(clippy::too_many_lines)]
     pub fn encode_checkpoint(mut self, checkpoint: &[u8], frame: u64) -> std::io::Result<u32> {
         use rmp::encode as r;
         let stopwatch = clock::time(Timer::EncodeStatestream);
