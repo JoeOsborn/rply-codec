@@ -52,11 +52,9 @@ fn main() {
         Timer::EncodeStatestream,
     ] {
         let times = stats(timer);
-        println!(
-            "{timer:?}: {} ({:.8}ms avg)",
-            times.count,
-            ((times.micros as f64 / times.count as f64) / 1000.0)
-        );
+        #[allow(clippy::cast_precision_loss)]
+        let avg_time = (times.micros as f64 / times.count as f64) / 1000.0;
+        println!("{timer:?}: {} ({avg_time:.8}ms avg)", times.count,);
     }
     for counter in [
         Counter::EncReusedBlocks,
