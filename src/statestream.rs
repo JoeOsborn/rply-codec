@@ -278,6 +278,7 @@ impl<'w, 'c, W: std::io::Write> Encoder<'w, 'c, W> {
                 };
                 superblock_contents[block_i] = found_block.index;
                 if found_block.is_new {
+                    let block_out_bytes = self.ctx.block_index.get(found_block.index);
                     bytes_out += rmp_size(r::write_uint(
                         self.writer,
                         u64::from(u8::from(SSToken::NewBlock)),
@@ -285,8 +286,8 @@ impl<'w, 'c, W: std::io::Write> Encoder<'w, 'c, W> {
                     bytes_out +=
                         rmp_size(r::write_uint(self.writer, u64::from(found_block.index))?);
                     bytes_out += rmp_size(r::write_bin_len(self.writer, self.ctx.block_size)?);
-                    self.writer.write_all(block_bytes)?;
-                    bytes_out += block_bytes.len();
+                    self.writer.write_all(block_out_bytes)?;
+                    bytes_out += block_out_bytes.len();
                 }
             }
             let found_superblock = self

@@ -423,7 +423,6 @@ pub fn decode<R: std::io::BufRead>(rply: &mut R) -> Result<ReplayDecoder<'_, R>>
 pub struct ReplayEncoder<'a, W: std::io::Write + std::io::Seek> {
     rply: &'a mut W,
     pub header: Header,
-    // pub initial_state: Vec<u8>,
     pub frame_number: u64,
     last_pos: u64,
     ss_state: statestream::Ctx,
@@ -572,8 +571,6 @@ impl<'w, W: std::io::Write + std::io::Seek> ReplayEncoder<'w, W> {
         Ok(())
     }
     fn encode_initial_checkpoint(&mut self, checkpoint: &[u8]) -> Result<()> {
-        // let initial = std::mem::take(&mut self.initial_state);
-        let old_pos = self.rply.stream_position()?;
         self.rply
             .seek(std::io::SeekFrom::Start(HEADERV2_LEN_BYTES as u64))?;
         self.encode_checkpoint(checkpoint, 0)?;
@@ -581,12 +578,9 @@ impl<'w, W: std::io::Write + std::io::Seek> ReplayEncoder<'w, W> {
         self.header.set_initial_state_size(
             u32::try_from(encoded_size).map_err(ReplayError::CheckpointTooBig)?,
         );
-        // self.initial_state = initial;
-        // dbg!("initial state size", self.header.initial_state_size());
         // Have to rewrite header to account for initial state size
         self.write_header()?;
         self.last_pos = self.rply.stream_position()?;
-        self.rply.seek(std::io::SeekFrom::Start(old_pos))?;
         Ok(())
     }
 
