@@ -9,13 +9,13 @@ fn main() {
             .unwrap_or(&"examples/bobl_smallblocks.replay".to_string()),
     )
     .unwrap();
-    let mut file = std::io::BufReader::new(file);
+    let file = std::io::BufReader::new(file);
     let mut outfile = std::io::BufWriter::new(outfile);
-    let mut rply = decode(&mut file).unwrap();
+    let mut rply = decode(file).unwrap();
     let header = &rply.header;
     println!("{header:?}");
     if header.version() == 0 {
-        println!("Can't upgrade v0 replays without a core");
+        println!("Can't upgrade v0 replays with reencode, upgrade to v1 first using upgrade0");
         std::process::exit(-1);
     }
     let mut header_out = header.clone();
@@ -38,6 +38,10 @@ fn main() {
             rply.frame_number,
             frame.inputs(),
         );
+
+        // TODO run libretro core here, maybe serialize into frame.checkpoint_bytes
+        // TODO maybe get screenshot or add to video
+
         //frame.drop_checkpoint();
         out.write_frame(&frame).unwrap();
         if Some(rply.frame_number) == rply.header.frame_count() {

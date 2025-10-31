@@ -176,15 +176,15 @@ pub enum ReplayError {
 
 type Result<T> = std::result::Result<T, ReplayError>;
 
-pub struct ReplayDecoder<'a, R: std::io::BufRead> {
-    rply: &'a mut R,
+pub struct ReplayDecoder<R: std::io::BufRead> {
+    rply: R,
     pub header: Header,
     pub initial_state: Vec<u8>,
     pub frame_number: u64,
     ss_state: statestream::Ctx,
 }
 
-impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
+impl<R: std::io::BufRead> ReplayDecoder<R> {
     /// Creates a [`ReplayDecoder`] for the given buffered readable stream.
     ///
     /// # Errors
@@ -192,7 +192,7 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
     /// [`ReplayError::Magic`]: Invalid magic number at beginning of file
     /// [`ReplayError::Version`]: Version identifier not recognized by parser
     /// [`ReplayError::Compression`]: Unsupported compression scheme for checkpoints
-    pub fn new(rply: &mut R) -> Result<ReplayDecoder<'_, R>> {
+    pub fn new(mut rply: R) -> Result<ReplayDecoder<R>> {
         use byteorder::{LittleEndian, ReadBytesExt};
         let magic = rply.read_u32::<LittleEndian>()?;
         if magic != MAGIC {
@@ -245,35 +245,20 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
             frame_number: 0,
             ss_state: statestream::Ctx::new(block_size, superblock_size),
         };
-        if replay.header.version() == 1 {
-            replay.rply.read_exact(&mut replay.initial_state)?;
-        } else {
-            replay.decode_initial_checkpoint()?;
-        }
+        replay.decode_initial_checkpoint()?;
         Ok(replay)
     }
 
-    /// Reads a single frame at the current decoder position.
+    pub fn inner(&mut self) -> &mut R {
+        &mut self.rply
+    }
+
+    /// Reads keyboard event records at the current input position.  Only really appropriate to explicitly call for v0 replays.
     /// # Errors
     /// [`ReplayError::IO`]: Unexpected end of stream or other I/O error
-    /// [`ReplayError::Compression`]: Unsupported compression scheme
-    /// [`ReplayError::Encoding`]: Unsupported encoding scheme
-    /// [`ReplayError::BadFrameToken`]: Frame token not recognized or misaligned
-    /// [`ReplayError::NoCoreRead`]: Tried to read a frame on a version 0 replay without a loaded core
-    /// [`ReplayError::CheckpointTooBig`]: Tried to read a checkpoint bigger than the address space
-    #[allow(clippy::too_many_lines)]
-    pub fn read_frame(&mut self, frame: &mut Frame) -> Result<()> {
+    pub fn read_key_events(&mut self, frame: &mut Frame) -> Result<()> {
         use byteorder::{LittleEndian, ReadBytesExt};
-        let stopwatch = clock::time(Timer::DecodeFrame);
-        let vsn = self.header.version();
-        let rply = &mut *self.rply;
-        if vsn == 0 {
-            return Err(ReplayError::NoCoreRead());
-        }
-        if vsn > 1 {
-            /* skip over the backref */
-            let _ = rply.read_u32::<LittleEndian>()?;
-        }
+        let rply = &mut self.rply;
         let key_count = rply.read_u8()? as usize;
         frame.key_events.resize_with(key_count, Default::default);
         for ki in 0..key_count {
@@ -294,6 +279,74 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
             };
             frame.key_events[ki] = key_data;
         }
+        Ok(())
+    }
+
+    /// Reads an end of frame marker at the current input position.  Only really appropriate to explicitly call for v0 replays.
+    /// # Errors
+    /// [`ReplayError::IO`]: Unexpected end of stream or other I/O error
+    /// [`ReplayError::Compression`]: Unsupported compression scheme
+    /// [`ReplayError::Encoding`]: Unsupported encoding scheme
+    /// [`ReplayError::BadFrameToken`]: Frame token not recognized or misaligned
+    /// [`ReplayError::CheckpointTooBig`]: Tried to read a checkpoint bigger than the address space
+    pub fn read_end_of_frame(&mut self, frame: &mut Frame) -> Result<()> {
+        use byteorder::{LittleEndian, ReadBytesExt};
+        let rply = &mut self.rply;
+        let tok = rply.read_u8()?;
+        match FrameToken::from(tok) {
+            FrameToken::Regular => {
+                frame.checkpoint_compression = Compression::None;
+                frame.checkpoint_encoding = Encoding::Raw;
+                frame.checkpoint_bytes.clear();
+            }
+            FrameToken::Checkpoint => {
+                frame.checkpoint_compression = Compression::None;
+                frame.checkpoint_encoding = Encoding::Raw;
+                let cp_size = usize::try_from(rply.read_u64::<LittleEndian>()?)
+                    .map_err(ReplayError::CheckpointTooBig)?;
+                frame.checkpoint_bytes.resize(cp_size, 0);
+                rply.read_exact(frame.checkpoint_bytes.as_mut_slice())?;
+            }
+            FrameToken::Checkpoint2 => {
+                self.decode_checkpoint(&mut frame.checkpoint_bytes)?;
+            }
+            _ => return Err(ReplayError::BadFrameToken(tok)),
+        }
+        Ok(())
+    }
+
+    /// Reads a single button value at the current input position.  Only appropriate for v0 replays and only if you are implementing an input callback for a core.
+    /// # Errors
+    /// [`ReplayError::IO`]: Unexpected end of stream or other I/O error
+    pub fn read_v0_button(&mut self) -> Result<i16> {
+        use byteorder::{LittleEndian, ReadBytesExt};
+        self.rply
+            .read_i16::<LittleEndian>()
+            .map_err(ReplayError::IO)
+    }
+
+    /// Reads a single frame at the current decoder position.
+    /// # Errors
+    /// [`ReplayError::IO`]: Unexpected end of stream or other I/O error
+    /// [`ReplayError::Compression`]: Unsupported compression scheme
+    /// [`ReplayError::Encoding`]: Unsupported encoding scheme
+    /// [`ReplayError::BadFrameToken`]: Frame token not recognized or misaligned
+    /// [`ReplayError::NoCoreRead`]: Tried to read a frame on a version 0 replay without a loaded core
+    /// [`ReplayError::CheckpointTooBig`]: Tried to read a checkpoint bigger than the address space
+    #[allow(clippy::too_many_lines)]
+    pub fn read_frame(&mut self, frame: &mut Frame) -> Result<()> {
+        use byteorder::{LittleEndian, ReadBytesExt};
+        let stopwatch = clock::time(Timer::DecodeFrame);
+        let vsn = self.header.version();
+        if vsn == 0 {
+            return Err(ReplayError::NoCoreRead());
+        }
+        if vsn > 1 {
+            /* skip over the backref */
+            let _ = self.rply.read_u32::<LittleEndian>()?;
+        }
+        self.read_key_events(frame)?;
+        let rply = &mut self.rply;
         let input_count = rply.read_u16::<LittleEndian>()? as usize;
         frame
             .input_events
@@ -315,26 +368,7 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
             };
             frame.input_events[ii] = inp_data;
         }
-        let tok = rply.read_u8()?;
-        match FrameToken::from(tok) {
-            FrameToken::Invalid => return Err(ReplayError::BadFrameToken(tok)),
-            FrameToken::Regular => {
-                frame.checkpoint_compression = Compression::None;
-                frame.checkpoint_encoding = Encoding::Raw;
-                frame.checkpoint_bytes.clear();
-            }
-            FrameToken::Checkpoint => {
-                frame.checkpoint_compression = Compression::None;
-                frame.checkpoint_encoding = Encoding::Raw;
-                let cp_size = usize::try_from(rply.read_u64::<LittleEndian>()?)
-                    .map_err(ReplayError::CheckpointTooBig)?;
-                frame.checkpoint_bytes.resize(cp_size, 0);
-                rply.read_exact(frame.checkpoint_bytes.as_mut_slice())?;
-            }
-            FrameToken::Checkpoint2 => {
-                self.decode_checkpoint(&mut frame.checkpoint_bytes)?;
-            }
-        }
+        self.read_end_of_frame(frame)?;
         self.frame_number += 1;
         drop(stopwatch);
         Ok(())
@@ -350,7 +384,7 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
     fn decode_checkpoint(&mut self, checkpoint_bytes: &mut Vec<u8>) -> Result<()> {
         use byteorder::{LittleEndian, ReadBytesExt};
         let stopwatch = clock::time(Timer::DecodeCheckpoint);
-        let rply = &mut *self.rply;
+        let rply = &mut self.rply;
         // read a 1 byte compression code
         let compression =
             Compression::try_from(rply.read_u8()?).map_err(ReplayError::Compression)?;
@@ -424,7 +458,7 @@ impl<R: std::io::BufRead> ReplayDecoder<'_, R> {
 ///
 /// # Errors
 /// See [`ReplayDecoder::new`].
-pub fn decode<R: std::io::BufRead>(rply: &mut R) -> Result<ReplayDecoder<'_, R>> {
+pub fn decode<R: std::io::BufRead>(rply: R) -> Result<ReplayDecoder<R>> {
     ReplayDecoder::new(rply)
 }
 
@@ -723,14 +757,15 @@ impl Header {
             *self = Header::V2(HeaderV2 {
                 base: base.clone(),
                 frame_count: 0,
-                block_size: 0,
-                superblock_size: 0,
-                checkpoint_commit_interval: 0,
-                checkpoint_commit_threshold: 0,
+                block_size: 256,
+                superblock_size: 256,
+                checkpoint_commit_interval: 8,
+                checkpoint_commit_threshold: 4,
                 checkpoint_compression: Compression::None,
             });
         }
         let Header::V2(v2) = self else { unreachable!() };
+        v2.base.version = 2;
         v2
     }
     #[must_use]
@@ -829,6 +864,11 @@ impl Frame {
         self.checkpoint_bytes.clear();
         self.checkpoint_compression = Compression::None;
         self.checkpoint_encoding = Encoding::Raw;
+    }
+    pub fn clear(&mut self) {
+        self.key_events.clear();
+        self.input_events.clear();
+        self.drop_checkpoint();
     }
 }
 
