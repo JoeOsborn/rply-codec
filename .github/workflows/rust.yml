@@ -14,8 +14,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
-    - name: Install prerequisite libraries
-      run: sudo apt update && sudo apt install -y libavcodec-dev libavformat-dev libavutil-dev
+    - uses: awalsh128/cache-apt-pkgs-action@latest
+      with:
+        packages: libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev
     - name: Rust Cache
       uses: Swatinem/rust-cache@v2.7.7
       with:
