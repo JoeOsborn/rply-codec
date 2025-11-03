@@ -17,7 +17,6 @@ jobs:
     - uses: FedericoCarboni/setup-ffmpeg@v3
       id: setup-ffmpeg
       with:
-        ffmpeg-version: "8.0"
         linking-type: static
         # As of version 3 of this action, builds are no longer downloaded from GitHub
         # except on Windows: https://github.com/GyanD/codexffmpeg/releases.
