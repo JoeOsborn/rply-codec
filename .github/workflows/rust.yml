@@ -15,7 +15,7 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: Install prerequisite libraries
-      run: sudo apt install -y libavcodec-dev libavformat-dev libavutil-dev
+      run: sudo apt update && sudo apt install -y libavcodec-dev libavformat-dev libavutil-dev
     - name: Rust Cache
       uses: Swatinem/rust-cache@v2.7.7
       with:
