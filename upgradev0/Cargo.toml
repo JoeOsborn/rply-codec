@@ -5,4 +5,4 @@ edition = "2024"
 
 [dependencies]
 rply-codec = { path = "../codec" }
-retro-rs = { version = "0.5.2", default-features=false }
+retro-rs = { version = "0.5.3", default-features=false }

@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 rply-codec = { path = "../codec" }
-retro-rs = { version = "0.5.2", default-features=false }
-video-rs = "0.10.5"
+retro-rs = { version = "0.5.4", default-features=false, path = "../../retro-rs" }
+ffmpeg-next = "8.0.0"
