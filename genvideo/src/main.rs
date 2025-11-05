@@ -123,11 +123,6 @@ fn main() {
         out_audio_enc.frame_size() as usize,
         out_audio_enc.channel_layout(),
     );
-    let mut out_i16frame = FFAFrame::new(
-        ffmpeg_next::format::Sample::I16(ffmpeg_next::format::sample::Type::Packed),
-        out_audio_enc.frame_size() as usize,
-        out_audio_enc.channel_layout(),
-    );
     // dbg!(
     //     out_audio_enc.channels(),
     //     out_audio_enc.channel_layout(),
@@ -150,7 +145,7 @@ fn main() {
         out_video_enc.format(),
     )
     .unwrap();
-    let mut audio_buf = ringbuf::LocalRb::new(out_aframe.samples() * 2 * 4);
+    let mut audio_buf = ringbuf::LocalRb::new(out_aframe.samples() * 2 * 20);
     let mut frame_audio_buf = vec![0_i16; out_aframe.samples() * 2];
     let mut audio_frame = 0;
     while let Ok(()) = rply
@@ -173,6 +168,10 @@ fn main() {
         // let mut rgb = image::RgbImage::new(w as u32, h as u32);
         // rgb.clone_from_slice(&fb);
         // rgb.save(format!("test/{frame_num}.png")).unwrap();
+        println!(
+            "Send video frame at {frame_pts}; as audio frame {}",
+            frame_pts.rescale(emu_time_base, audio_stream_time_base)
+        );
         out_vframe.set_pts(Some(frame_pts));
         out_video_enc.send_frame(&out_vframe).unwrap();
         // copy audio to out_aframe, set_pts
@@ -180,12 +179,23 @@ fn main() {
         #[allow(unused_must_use)]
         emu.peek_audio_sample(|samples| {
             audio_buf.push_slice_overwrite(samples);
-            while audio_buf.occupied_len() >= out_aframe.samples() {
-                enc_audio = true;
-                audio_buf.pop_slice(&mut frame_audio_buf);
+            println!(
+                "read {} samples, current len {}",
+                samples.len(),
+                audio_buf.occupied_len()
+            );
+            while audio_buf.occupied_len() >= out_aframe.samples() * 2 {
+                assert_eq!(
+                    audio_buf.pop_slice(&mut frame_audio_buf),
+                    frame_audio_buf.len()
+                );
+                println!(
+                    "copy {} samples at {audio_frame}",
+                    frame_audio_buf.len() / 2
+                );
                 copy_audio(&frame_audio_buf, &mut out_aframe);
                 out_aframe.set_pts(Some(audio_frame));
-                audio_frame += out_aframe.samples();
+                audio_frame += out_aframe.samples() as i64;
                 out_audio_enc.send_frame(&out_aframe).unwrap();
             }
         });
@@ -208,25 +218,32 @@ fn main() {
             break;
         }
     }
+    dbg!(audio_frame as f32 / 48000.0);
     while audio_buf.occupied_len() >= out_aframe.samples() {
         let len = audio_buf.pop_slice(&mut frame_audio_buf);
         frame_audio_buf[len..].fill(0);
         out_aframe.set_pts(Some(audio_frame));
-        out_aframe.set_samples(len / 2);
-        audio_frame += out_aframe.samples();
+        audio_frame += (len / 2) as i64;
         copy_audio(&frame_audio_buf, &mut out_aframe);
         out_audio_enc.send_frame(&out_aframe).unwrap();
+    }
+
+    out_video_enc.send_eof().unwrap();
+    out_audio_enc.send_eof().unwrap();
+
+    while out_video_enc.receive_packet(&mut encoded_video).is_ok() {
+        encoded_video.set_stream(0);
+        encoded_video.rescale_ts(out_video_enc.time_base(), video_stream_time_base);
+        encoded_video.write_interleaved(&mut output).unwrap();
     }
     while out_audio_enc.receive_packet(&mut encoded_audio).is_ok() {
         encoded_audio.set_stream(1);
         encoded_audio.rescale_ts(out_audio_enc.time_base(), audio_stream_time_base);
         encoded_audio.write_interleaved(&mut output).unwrap();
     }
-
-    out_video_enc.send_eof().unwrap();
-    out_audio_enc.send_eof().unwrap();
     output.write_trailer().unwrap();
     dbg!(output.stream(0).unwrap().time_base());
+    dbg!(audio_frame as f32 / 48000.0);
 }
 
 fn frame_to_buttons(frame: &Frame) -> [retro_rs::Buttons; 2] {
