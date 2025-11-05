@@ -7,3 +7,4 @@ edition = "2024"
 rply-codec = { path = "../codec" }
 retro-rs = { version = "0.5.4", default-features=false, path = "../../retro-rs" }
 ffmpeg-next = "8.0.0"
+ringbuf = "0.4.8"
