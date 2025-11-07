@@ -7,14 +7,14 @@ use std::rc::Rc;
 fn main() {
     let args: Vec<_> = std::env::args().collect();
     let file =
-        std::fs::File::open(args.get(1).unwrap_or(&"examples/v0.replay".to_string())).unwrap();
+        std::fs::File::open(args.get(1).unwrap_or(&"examples/ff3.replay".to_string())).unwrap();
     let outfile =
-        std::fs::File::create(args.get(2).unwrap_or(&"examples/v2.replay".to_string())).unwrap();
+        std::fs::File::create(args.get(2).unwrap_or(&"examples/ff3v2.replay".to_string())).unwrap();
     let corefile = args
         .get(3)
-        .unwrap_or(&"cores/fceumm_libretro".to_string())
+        .unwrap_or(&"cores/snes9x_libretro".to_string())
         .clone();
-    let romfile = args.get(4).unwrap_or(&"roms/demo.nes".to_string()).clone();
+    let romfile = args.get(4).unwrap_or(&"roms/ff3.sfc".to_string()).clone();
     let mut emu = Emulator::create(Path::new(&corefile), Path::new(&romfile));
     let file = std::io::BufReader::new(file);
     let mut outfile = std::io::BufWriter::new(outfile);

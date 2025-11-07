@@ -40,14 +40,6 @@ impl ToI32 for f64 {
     }
 }
 
-fn copy_audio(samples: &[i16], frame: &mut FFAFrame) {
-    const BOUND: f32 = i16::MAX as f32;
-    for (i, pair) in samples.chunks_exact(2).enumerate() {
-        let [l, r] = pair else { unreachable!() };
-        frame.plane_mut(0)[i] = f32::from(*l) / BOUND;
-        frame.plane_mut(1)[i] = f32::from(*r) / BOUND;
-    }
-}
 struct VideoState {
     out_video_enc: ffmpeg_next::encoder::video::Encoder,
     out_vframe: FFVFrame,
@@ -146,7 +138,8 @@ impl VideoState {
         // copy video to out_vframe
         if self.native_pixel_format {
             emu.peek_framebuffer(|fb| {
-                self.out_rgbframe.data_mut(0).copy_from_slice(fb);
+                let len = self.out_rgbframe.data(0).len();
+                self.out_rgbframe.data_mut(0).copy_from_slice(&fb[0..len]);
             })
             .unwrap();
         } else {
@@ -171,14 +164,15 @@ impl VideoState {
 struct AudioState {
     out_audio_enc: ffmpeg_next::encoder::audio::Encoder,
     out_aframe: FFAFrame,
+    in_aframe: FFAFrame,
     encoded_audio: ffmpeg_next::Packet,
     audio_buf: ringbuf::LocalRb<ringbuf::storage::Heap<i16>>,
-    frame_audio_buf: Vec<i16>,
     audio_frame: i64,
+    resampler: ffmpeg_next::software::resampling::Context,
 }
 
 impl AudioState {
-    fn new(audio_sample_rate: i32, output: &mut FFOut) -> Self {
+    fn new(in_audio_sample_rate: i32, output: &mut FFOut) -> Self {
         let out_audio_codec = ffmpeg_next::encoder::find(ffmpeg_next::codec::Id::AAC).unwrap();
         let mut out_audio_ctx =
             ffmpeg_next::codec::context::Context::new_with_codec(out_audio_codec);
@@ -188,14 +182,14 @@ impl AudioState {
             let aps = audio_params.as_mut_ptr();
             (*aps).codec_id = out_audio_codec.id().into();
             (*aps).codec_type = ffmpeg_next::ffi::AVMediaType::AVMEDIA_TYPE_AUDIO;
-            (*aps).sample_rate = audio_sample_rate;
+            (*aps).sample_rate = 48000;
             (*aps).frame_size = 1024 * 2 * 4;
             (*aps).channels = 2;
         };
         out_audio_ctx.set_parameters(audio_params).unwrap();
         let _out_audio = output.add_stream_with(&out_audio_ctx).unwrap();
         let encoded_audio = ffmpeg_next::Packet::empty();
-        let audio_time_base = Rational::new(1, audio_sample_rate);
+        let audio_time_base = Rational::new(1, 48000);
         let mut out_audio_enc = out_audio_ctx.encoder().audio().unwrap();
         out_audio_enc.set_channels(2);
         out_audio_enc.set_format(ffmpeg_next::format::Sample::F32(
@@ -203,23 +197,48 @@ impl AudioState {
         ));
         out_audio_enc.set_channel_layout(ffmpeg_next::ChannelLayout::STEREO);
         out_audio_enc.set_time_base(audio_time_base);
-        out_audio_enc.set_rate(audio_sample_rate);
+        out_audio_enc.set_rate(48000);
         let out_audio_enc = out_audio_enc.open().unwrap();
-        let out_aframe = FFAFrame::new(
+        let mut in_aframe = FFAFrame::new(
+            ffmpeg_next::format::Sample::I16(ffmpeg_next::format::sample::Type::Packed),
+            out_audio_enc.frame_size() as usize,
+            ffmpeg_next::ChannelLayout::STEREO,
+        );
+        in_aframe.set_rate(u32::try_from(in_audio_sample_rate).unwrap());
+        let mut out_aframe = FFAFrame::new(
             out_audio_enc.format(),
             out_audio_enc.frame_size() as usize,
             out_audio_enc.channel_layout(),
         );
-        let audio_buf = ringbuf::LocalRb::new(out_aframe.samples() * 2 * 20);
-        let frame_audio_buf = vec![0_i16; out_aframe.samples() * 2];
+        out_aframe.set_rate(out_audio_enc.rate());
+        let resampler = ffmpeg_next::software::resampler(
+            (
+                in_aframe.format(),
+                in_aframe.channel_layout(),
+                in_aframe.rate(),
+            ),
+            (
+                out_aframe.format(),
+                out_aframe.channel_layout(),
+                out_aframe.rate(),
+            ),
+        )
+        .unwrap();
+        println!(
+            "Resample from {} to {}",
+            in_aframe.rate(),
+            out_aframe.rate()
+        );
+        let audio_buf = ringbuf::LocalRb::new(in_aframe.samples() * 2 * 20);
 
         Self {
             out_audio_enc,
             out_aframe,
             encoded_audio,
             audio_buf,
-            frame_audio_buf,
             audio_frame: 0,
+            resampler,
+            in_aframe,
         }
     }
     fn writeout(&mut self, output: &mut FFOut) {
@@ -235,16 +254,24 @@ impl AudioState {
             self.encoded_audio.write_interleaved(output).unwrap();
         }
     }
+    fn resample(&mut self, drain: bool) {
+        match self.resampler.run(&self.in_aframe, &mut self.out_aframe) {
+            Ok(Some(_delay)) if drain => {
+                let null_frame = unsafe { FFAFrame::wrap(std::ptr::null_mut()) };
+                while let Ok(Some(_)) = self.resampler.run(&null_frame, &mut self.out_aframe) {}
+            }
+            Err(e) => println!("Resampler error {e}"),
+            _ => {}
+        }
+    }
     fn send_frames(&mut self, emu: &Emulator, output: &mut FFOut) {
         #[allow(unused_must_use)]
         emu.peek_audio_sample(|samples| {
             self.audio_buf.push_slice_overwrite(samples);
-            while self.audio_buf.occupied_len() >= self.out_aframe.samples() * 2 {
-                assert_eq!(
-                    self.audio_buf.pop_slice(&mut self.frame_audio_buf),
-                    self.frame_audio_buf.len()
-                );
-                copy_audio(&self.frame_audio_buf, &mut self.out_aframe);
+            while self.audio_buf.occupied_len() >= self.in_aframe.samples() * 2 {
+                let (_, toconvert, _) = unsafe { self.in_aframe.data_mut(0).align_to_mut::<i16>() };
+                assert_eq!(self.audio_buf.pop_slice(toconvert), toconvert.len());
+                self.resample(false);
                 self.out_aframe.set_pts(Some(self.audio_frame));
                 self.audio_frame += i64::try_from(self.out_aframe.samples()).unwrap();
                 self.out_audio_enc.send_frame(&self.out_aframe).unwrap();
@@ -254,11 +281,12 @@ impl AudioState {
     }
     fn drain(&mut self, output: &mut FFOut) {
         while self.audio_buf.occupied_len() >= self.out_aframe.samples() {
-            let len = self.audio_buf.pop_slice(&mut self.frame_audio_buf);
-            self.frame_audio_buf[len..].fill(0);
+            let (_, toconvert, _) = unsafe { self.in_aframe.data_mut(0).align_to_mut::<i16>() };
+            let len = self.audio_buf.pop_slice(toconvert);
+            toconvert[len..].fill(0);
+            self.resample(true);
             self.out_aframe.set_pts(Some(self.audio_frame));
             self.audio_frame += i64::try_from(len / 2).unwrap();
-            copy_audio(&self.frame_audio_buf, &mut self.out_aframe);
             self.out_audio_enc.send_frame(&self.out_aframe).unwrap();
         }
         self.out_audio_enc.send_eof().unwrap();
@@ -266,18 +294,21 @@ impl AudioState {
     }
 }
 
+// bobl example: /home/jcoa2018/.cargo/bin/cargo run --manifest-path /home/jcoa2018/Projects/rply-codec/genvideo/Cargo.toml  --bin genvideo examples/bobl.replay examples/bobl.mp4 cores/fceumm_libretro roms/bobl.nes
+// ff3 example: /home/jcoa2018/.cargo/bin/cargo run --manifest-path /home/jcoa2018/Projects/rply-codec/genvideo/Cargo.toml  --bin genvideo examples/ff3v2.replay examples/ff3.mp4 cores/snes9x_libretro roms/ff3.nes
+
 fn main() {
     ffmpeg_next::init().unwrap();
-    ffmpeg_next::log::set_level(ffmpeg_next::log::Level::Warning);
+    ffmpeg_next::log::set_level(ffmpeg_next::log::Level::Trace);
     let args: Vec<_> = std::env::args().collect();
     let file =
-        std::fs::File::open(args.get(1).unwrap_or(&"examples/bobl.replay".to_string())).unwrap();
-    let outfile = std::path::PathBuf::from(args.get(2).unwrap_or(&"examples/bobl.mp4".to_string()));
+        std::fs::File::open(args.get(1).unwrap_or(&"examples/ff3v2.replay".to_string())).unwrap();
+    let outfile = std::path::PathBuf::from(args.get(2).unwrap_or(&"examples/ff3.mp4".to_string()));
     let corefile = args
         .get(3)
-        .unwrap_or(&"cores/fceumm_libretro".to_string())
+        .unwrap_or(&"cores/snes9x_libretro".to_string())
         .clone();
-    let romfile = args.get(4).unwrap_or(&"roms/bobl.nes".to_string()).clone();
+    let romfile = args.get(4).unwrap_or(&"roms/ff3.sfc".to_string()).clone();
     let mut emu = Emulator::create(Path::new(&corefile), Path::new(&romfile));
     let file = std::io::BufReader::new(file);
     let mut rply = decode(file).unwrap();
