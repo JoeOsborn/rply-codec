@@ -48,11 +48,13 @@ struct VideoState {
     converter: ffmpeg_next::software::scaling::Context,
     emu_time_base: Rational,
     native_pixel_format: bool,
+    stride: usize,
 }
 
 impl VideoState {
     fn new(
         emu_time_base: Rational,
+        aspect_ratio: Rational,
         w: usize,
         h: usize,
         pixel_format: retro_rs::libretro::retro_pixel_format,
@@ -69,6 +71,7 @@ impl VideoState {
             (*vps).height = i32::try_from(h).unwrap();
             (*vps).codec_id = out_video_codec.id().into();
             (*vps).codec_type = ffmpeg_next::ffi::AVMediaType::AVMEDIA_TYPE_VIDEO;
+            (*vps).sample_aspect_ratio = aspect_ratio.into();
         };
         out_video_ctx.set_parameters(video_params).unwrap();
         let _out_video = output.add_stream_with(&out_video_ctx).unwrap();
@@ -76,6 +79,7 @@ impl VideoState {
         // out_video.set_time_base(emu_time_base);
         let mut out_video_enc = out_video_ctx.encoder().video().unwrap();
         out_video_enc.set_format(ffmpeg_next::format::Pixel::YUV420P);
+        out_video_enc.set_aspect_ratio(aspect_ratio);
         out_video_enc.set_width(u32::try_from(w).unwrap());
         out_video_enc.set_height(u32::try_from(h).unwrap());
         out_video_enc.set_time_base(emu_time_base);
@@ -85,17 +89,17 @@ impl VideoState {
             out_video_enc.width(),
             out_video_enc.height(),
         );
-        let (copy_format, is_native) = match pixel_format {
+        let (copy_format, is_native, stride) = match pixel_format {
             retro_rs::libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_0RGB1555 => {
-                (ffmpeg_next::format::Pixel::RGB555, true)
+                (ffmpeg_next::format::Pixel::RGB555, true, 2)
             }
             retro_rs::libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_XRGB8888 => {
-                (ffmpeg_next::format::Pixel::ZRGB, true)
+                (ffmpeg_next::format::Pixel::ZRGB, true, 4)
             }
             retro_rs::libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_RGB565 => {
-                (ffmpeg_next::format::Pixel::RGB565, true)
+                (ffmpeg_next::format::Pixel::RGB565, true, 2)
             }
-            _other => (ffmpeg_next::format::Pixel::RGB24, false),
+            _other => (ffmpeg_next::format::Pixel::RGB24, false, 3),
         };
         let out_rgbframe = FFVFrame::new(
             copy_format,
@@ -117,6 +121,7 @@ impl VideoState {
             converter,
             emu_time_base,
             native_pixel_format: is_native,
+            stride,
         }
     }
     fn writeout(&mut self, output: &mut FFOut) {
@@ -136,9 +141,15 @@ impl VideoState {
         // output one frame of video/audio, set_pts
         // copy video to out_vframe
         if self.native_pixel_format {
+            let pitch = emu.framebuffer_pitch();
+            let (w, h) = emu.framebuffer_size();
+            let stride = self.stride;
             emu.peek_framebuffer(|fb| {
-                let len = self.out_rgbframe.data(0).len();
-                self.out_rgbframe.data_mut(0).copy_from_slice(&fb[0..len]);
+                let data = self.out_rgbframe.data_mut(0);
+                for y in 0..h {
+                    data[(y * w * stride)..((y + 1) * w * stride)]
+                        .copy_from_slice(&fb[(y * pitch)..(y * pitch + w * stride)]);
+                }
             })
             .unwrap();
         } else {
@@ -166,12 +177,13 @@ struct AudioState {
     in_aframe: FFAFrame,
     encoded_audio: ffmpeg_next::Packet,
     audio_buf: ringbuf::LocalRb<ringbuf::storage::Heap<i16>>,
-    audio_frame: i64,
+    audio_frame_out: i64,
+    audio_frame_in: i64,
     resampler: ffmpeg_next::software::resampling::Context,
 }
 
 impl AudioState {
-    fn new(in_audio_sample_rate: i32, output: &mut FFOut) -> Self {
+    fn new(in_audio_sample_rate: i32, emu_video_frame_rate: i32, output: &mut FFOut) -> Self {
         let out_audio_codec = ffmpeg_next::encoder::find(ffmpeg_next::codec::Id::AAC).unwrap();
         let mut out_audio_ctx =
             ffmpeg_next::codec::context::Context::new_with_codec(out_audio_codec);
@@ -182,7 +194,7 @@ impl AudioState {
             (*aps).codec_id = out_audio_codec.id().into();
             (*aps).codec_type = ffmpeg_next::ffi::AVMediaType::AVMEDIA_TYPE_AUDIO;
             (*aps).sample_rate = 48000;
-            (*aps).frame_size = 1024 * 2 * 4;
+            (*aps).frame_size = 1024;
             (*aps).channels = 2;
         };
         out_audio_ctx.set_parameters(audio_params).unwrap();
@@ -200,7 +212,8 @@ impl AudioState {
         let out_audio_enc = out_audio_enc.open().unwrap();
         let mut in_aframe = FFAFrame::new(
             ffmpeg_next::format::Sample::I16(ffmpeg_next::format::sample::Type::Packed),
-            out_audio_enc.frame_size() as usize,
+            704,
+            //            dbg!(in_audio_sample_rate / emu_video_frame_rate) as usize,
             ffmpeg_next::ChannelLayout::STEREO,
         );
         in_aframe.set_rate(u32::try_from(in_audio_sample_rate).unwrap());
@@ -235,7 +248,8 @@ impl AudioState {
             out_aframe,
             encoded_audio,
             audio_buf,
-            audio_frame: 0,
+            audio_frame_out: 0,
+            audio_frame_in: 0,
             resampler,
             in_aframe,
         }
@@ -254,10 +268,21 @@ impl AudioState {
         }
     }
     fn resample(&mut self, drain: bool) {
-        match self.resampler.run(&self.in_aframe, &mut self.out_aframe) {
-            Ok(Some(_delay)) if drain => {
+        println!(
+            "RESAMPLE {:?} {:?}",
+            self.in_aframe.pts(),
+            self.out_aframe.pts()
+        );
+        match dbg!(self.resampler.run(&self.in_aframe, &mut self.out_aframe)) {
+            Ok(Some(delay)) if drain => {
+                dbg!(delay);
                 let null_frame = unsafe { FFAFrame::wrap(std::ptr::null_mut()) };
-                while let Ok(Some(_)) = self.resampler.run(&null_frame, &mut self.out_aframe) {}
+                while let Ok(Some(delay)) = self.resampler.run(&null_frame, &mut self.out_aframe) {
+                    dbg!("2", delay);
+                    if !drain {
+                        break;
+                    }
+                }
             }
             Err(e) => println!("Resampler error {e}"),
             _ => {}
@@ -270,22 +295,26 @@ impl AudioState {
             while self.audio_buf.occupied_len() >= self.in_aframe.samples() * 2 {
                 let (_, toconvert, _) = unsafe { self.in_aframe.data_mut(0).align_to_mut::<i16>() };
                 assert_eq!(self.audio_buf.pop_slice(toconvert), toconvert.len());
+                dbg!(toconvert.len());
+                self.in_aframe.set_pts(Some(self.audio_frame_in));
+                self.out_aframe.set_pts(Some(self.audio_frame_out));
+                self.audio_frame_in += i64::try_from(self.in_aframe.samples()).unwrap();
+                self.audio_frame_out += i64::try_from(self.out_aframe.samples()).unwrap();
                 self.resample(false);
-                self.out_aframe.set_pts(Some(self.audio_frame));
-                self.audio_frame += i64::try_from(self.out_aframe.samples()).unwrap();
+                dbg!(self.out_aframe.samples());
                 self.out_audio_enc.send_frame(&self.out_aframe).unwrap();
             }
         });
         self.writeout(output);
     }
     fn drain(&mut self, output: &mut FFOut) {
-        while self.audio_buf.occupied_len() >= self.out_aframe.samples() {
+        while self.audio_buf.occupied_len() > 0 {
             let (_, toconvert, _) = unsafe { self.in_aframe.data_mut(0).align_to_mut::<i16>() };
             let len = self.audio_buf.pop_slice(toconvert);
             toconvert[len..].fill(0);
             self.resample(true);
-            self.out_aframe.set_pts(Some(self.audio_frame));
-            self.audio_frame += i64::try_from(len / 2).unwrap();
+            self.out_aframe.set_pts(Some(self.audio_frame_out));
+            self.audio_frame_out += i64::try_from(len / 2).unwrap();
             self.out_audio_enc.send_frame(&self.out_aframe).unwrap();
         }
         self.out_audio_enc.send_eof().unwrap();
@@ -324,10 +353,13 @@ fn main() {
     assert!(emu.load(&rply.initial_state));
 
     let mut output = ffmpeg_next::format::output(&outfile).unwrap();
-    let emu_time_base = Rational::new(1, emu.get_video_fps().to_i32().unwrap());
+    let emu_video_framerate = emu.get_video_fps().to_i32().unwrap();
+    let emu_time_base = Rational::new(1, emu_video_framerate);
     let audio_sample_rate = emu.get_audio_sample_rate().to_i32().unwrap();
-    let mut video_state = VideoState::new(emu_time_base, w, h, pixel_format, &mut output);
-    let mut audio_state = AudioState::new(audio_sample_rate, &mut output);
+    let aspect_ratio = Rational::from(emu.get_aspect_ratio() as f64);
+    let mut video_state =
+        VideoState::new(emu_time_base, aspect_ratio, w, h, pixel_format, &mut output);
+    let mut audio_state = AudioState::new(audio_sample_rate, emu_video_framerate, &mut output);
     output.write_header().unwrap();
     let video_stream_time_base = output.stream(0).unwrap().time_base();
     let audio_stream_time_base = output.stream(1).unwrap().time_base();
