@@ -183,7 +183,7 @@ struct AudioState {
 }
 
 impl AudioState {
-    fn new(in_audio_sample_rate: i32, emu_video_frame_rate: i32, output: &mut FFOut) -> Self {
+    fn new(in_audio_sample_rate: i32, output: &mut FFOut) -> Self {
         let out_audio_codec = ffmpeg_next::encoder::find(ffmpeg_next::codec::Id::AAC).unwrap();
         let mut out_audio_ctx =
             ffmpeg_next::codec::context::Context::new_with_codec(out_audio_codec);
@@ -208,12 +208,12 @@ impl AudioState {
         ));
         out_audio_enc.set_channel_layout(ffmpeg_next::ChannelLayout::STEREO);
         out_audio_enc.set_time_base(audio_time_base);
-        out_audio_enc.set_rate(48000);
+        out_audio_enc.set_rate(audio_time_base.1);
         let out_audio_enc = out_audio_enc.open().unwrap();
         let mut in_aframe = FFAFrame::new(
             ffmpeg_next::format::Sample::I16(ffmpeg_next::format::sample::Type::Packed),
-            704,
-            //            dbg!(in_audio_sample_rate / emu_video_frame_rate) as usize,
+            1024,
+            //dbg!(in_audio_sample_rate / emu_video_frame_rate) as usize,
             ffmpeg_next::ChannelLayout::STEREO,
         );
         in_aframe.set_rate(u32::try_from(in_audio_sample_rate).unwrap());
@@ -223,24 +223,13 @@ impl AudioState {
             out_audio_enc.channel_layout(),
         );
         out_aframe.set_rate(out_audio_enc.rate());
-        let resampler = ffmpeg_next::software::resampler(
-            (
-                in_aframe.format(),
-                in_aframe.channel_layout(),
-                in_aframe.rate(),
-            ),
-            (
+        let resampler = in_aframe
+            .resampler(
                 out_aframe.format(),
                 out_aframe.channel_layout(),
                 out_aframe.rate(),
-            ),
-        )
-        .unwrap();
-        println!(
-            "Resample from {} to {}",
-            in_aframe.rate(),
-            out_aframe.rate()
-        );
+            )
+            .unwrap();
         let audio_buf = ringbuf::LocalRb::new(in_aframe.samples() * 2 * 20);
 
         Self {
@@ -267,25 +256,34 @@ impl AudioState {
             self.encoded_audio.write_interleaved(output).unwrap();
         }
     }
-    fn resample(&mut self, drain: bool) {
-        println!(
-            "RESAMPLE {:?} {:?}",
-            self.in_aframe.pts(),
-            self.out_aframe.pts()
-        );
-        match dbg!(self.resampler.run(&self.in_aframe, &mut self.out_aframe)) {
-            Ok(Some(delay)) if drain => {
-                dbg!(delay);
-                let null_frame = unsafe { FFAFrame::wrap(std::ptr::null_mut()) };
-                while let Ok(Some(delay)) = self.resampler.run(&null_frame, &mut self.out_aframe) {
-                    dbg!("2", delay);
-                    if !drain {
-                        break;
-                    }
-                }
+    fn resample_and_send(&mut self, output: &mut FFOut, drain: bool) {
+        match self.resampler.run(&self.in_aframe, &mut self.out_aframe) {
+            Ok(_) => {
+                self.in_aframe.set_pts(Some(self.audio_frame_in));
+                self.out_aframe.set_pts(Some(self.audio_frame_out));
+                self.audio_frame_in += i64::try_from(self.in_aframe.samples()).unwrap();
+                self.audio_frame_out += i64::try_from(self.out_aframe.samples()).unwrap();
+                self.out_audio_enc.send_frame(&self.out_aframe).unwrap();
+                self.writeout(output);
             }
-            Err(e) => println!("Resampler error {e}"),
-            _ => {}
+            Err(e) => {
+                println!("Resampler error {e}");
+            }
+        }
+        loop {
+            let Some(delay) = self.resampler.delay() else {
+                break;
+            };
+            if delay.output < 524 && !drain {
+                break;
+            }
+            self.in_aframe.set_pts(Some(self.audio_frame_in));
+            self.out_aframe.set_pts(Some(self.audio_frame_out));
+            self.resampler.flush(&mut self.out_aframe).unwrap();
+            self.audio_frame_in += i64::try_from(self.in_aframe.samples()).unwrap();
+            self.audio_frame_out += i64::try_from(self.out_aframe.samples()).unwrap();
+            self.out_audio_enc.send_frame(&self.out_aframe).unwrap();
+            self.writeout(output);
         }
     }
     fn send_frames(&mut self, emu: &Emulator, output: &mut FFOut) {
@@ -295,28 +293,18 @@ impl AudioState {
             while self.audio_buf.occupied_len() >= self.in_aframe.samples() * 2 {
                 let (_, toconvert, _) = unsafe { self.in_aframe.data_mut(0).align_to_mut::<i16>() };
                 assert_eq!(self.audio_buf.pop_slice(toconvert), toconvert.len());
-                dbg!(toconvert.len());
-                self.in_aframe.set_pts(Some(self.audio_frame_in));
-                self.out_aframe.set_pts(Some(self.audio_frame_out));
-                self.audio_frame_in += i64::try_from(self.in_aframe.samples()).unwrap();
-                self.audio_frame_out += i64::try_from(self.out_aframe.samples()).unwrap();
-                self.resample(false);
-                dbg!(self.out_aframe.samples());
-                self.out_audio_enc.send_frame(&self.out_aframe).unwrap();
+                self.resample_and_send(output, false);
             }
         });
-        self.writeout(output);
     }
     fn drain(&mut self, output: &mut FFOut) {
         while self.audio_buf.occupied_len() > 0 {
             let (_, toconvert, _) = unsafe { self.in_aframe.data_mut(0).align_to_mut::<i16>() };
             let len = self.audio_buf.pop_slice(toconvert);
             toconvert[len..].fill(0);
-            self.resample(true);
-            self.out_aframe.set_pts(Some(self.audio_frame_out));
-            self.audio_frame_out += i64::try_from(len / 2).unwrap();
-            self.out_audio_enc.send_frame(&self.out_aframe).unwrap();
+            self.resample_and_send(output, true);
         }
+        self.resample_and_send(output, true);
         self.out_audio_enc.send_eof().unwrap();
         self.writeout(output);
     }
@@ -356,19 +344,17 @@ fn main() {
     let emu_video_framerate = emu.get_video_fps().to_i32().unwrap();
     let emu_time_base = Rational::new(1, emu_video_framerate);
     let audio_sample_rate = emu.get_audio_sample_rate().to_i32().unwrap();
-    let aspect_ratio = Rational::from(emu.get_aspect_ratio() as f64);
+    let aspect_ratio = Rational::from(f64::from(emu.get_aspect_ratio()));
     let mut video_state =
         VideoState::new(emu_time_base, aspect_ratio, w, h, pixel_format, &mut output);
-    let mut audio_state = AudioState::new(audio_sample_rate, emu_video_framerate, &mut output);
+    let mut audio_state = AudioState::new(audio_sample_rate, &mut output);
     output.write_header().unwrap();
-    let video_stream_time_base = output.stream(0).unwrap().time_base();
-    let audio_stream_time_base = output.stream(1).unwrap().time_base();
-    video_state
-        .encoded_video
-        .set_time_base(video_stream_time_base);
-    audio_state
-        .encoded_audio
-        .set_time_base(audio_stream_time_base);
+    // video_state
+    //     .encoded_video
+    //     .set_time_base(video_stream_time_base);
+    // audio_state
+    //     .encoded_audio
+    //     .set_time_base(audio_stream_time_base);
 
     let mut frame = Frame::default();
     while let Ok(()) = rply
