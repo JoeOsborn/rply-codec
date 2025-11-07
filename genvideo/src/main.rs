@@ -310,12 +310,12 @@ impl AudioState {
     }
 }
 
-// bobl example: /home/jcoa2018/.cargo/bin/cargo run --manifest-path /home/jcoa2018/Projects/rply-codec/genvideo/Cargo.toml  --bin genvideo examples/bobl.replay examples/bobl.mp4 cores/fceumm_libretro roms/bobl.nes
-// ff3 example: /home/jcoa2018/.cargo/bin/cargo run --manifest-path /home/jcoa2018/Projects/rply-codec/genvideo/Cargo.toml  --bin genvideo examples/ff3v2.replay examples/ff3.mp4 cores/snes9x_libretro roms/ff3.nes
+// bobl example: cargo run --bin genvideo examples/bobl.replay examples/bobl.mp4 cores/fceumm_libretro roms/bobl.nes
+// ff3 example: cargo run --bin genvideo examples/ff3v2.replay examples/ff3.mp4 cores/snes9x_libretro roms/ff3.nes
 
 fn main() {
     ffmpeg_next::init().unwrap();
-    ffmpeg_next::log::set_level(ffmpeg_next::log::Level::Trace);
+    ffmpeg_next::log::set_level(ffmpeg_next::log::Level::Warning);
     let args: Vec<_> = std::env::args().collect();
     let file =
         std::fs::File::open(args.get(1).unwrap_or(&"examples/ff3v2.replay".to_string())).unwrap();
