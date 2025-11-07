@@ -85,7 +85,6 @@ impl VideoState {
             out_video_enc.width(),
             out_video_enc.height(),
         );
-        /* TODO: Consider using the pixel format of the emulator  here and avoid copying as rgb888 */
         let (copy_format, is_native) = match pixel_format {
             retro_rs::libretro::retro_pixel_format::RETRO_PIXEL_FORMAT_0RGB1555 => {
                 (ffmpeg_next::format::Pixel::RGB555, true)
