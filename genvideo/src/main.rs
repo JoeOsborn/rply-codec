@@ -212,8 +212,7 @@ impl AudioState {
         let out_audio_enc = out_audio_enc.open().unwrap();
         let mut in_aframe = FFAFrame::new(
             ffmpeg_next::format::Sample::I16(ffmpeg_next::format::sample::Type::Packed),
-            1024,
-            //dbg!(in_audio_sample_rate / emu_video_frame_rate) as usize,
+            1024, // Just my choice of buffering rate
             ffmpeg_next::ChannelLayout::STEREO,
         );
         in_aframe.set_rate(u32::try_from(in_audio_sample_rate).unwrap());
