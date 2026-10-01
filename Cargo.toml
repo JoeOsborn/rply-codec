@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
 members = ["codec", "dump", "reencode", "upgradev0", "genvideo"]
-
+license = "AGPL-3.0-or-later" 
 [profile.release]
 debug = true
