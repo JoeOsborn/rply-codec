@@ -63,7 +63,7 @@ fn main() {
         let times = stats(timer);
         #[allow(clippy::cast_precision_loss)]
         let avg_time = (times.micros as f64 / times.count as f64) / 1000.0;
-        println!("{timer:?}: {} ({avg_time:.8}ms avg)", times.count,);
+        println!("{timer:?}: {} ({avg_time:.8}ms avg)", times.count);
     }
     for counter in [
         Counter::DecSkippedSuperblocks,

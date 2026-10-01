@@ -269,13 +269,9 @@ impl AudioState {
                 println!("Resampler error {e}");
             }
         }
-        loop {
-            let Some(delay) = self.resampler.delay() else {
-                break;
-            };
-            if delay.output < 524 && !drain {
-                break;
-            }
+        while let Some(delay) = self.resampler.delay()
+            && (delay.output >= 524 || drain)
+        {
             self.in_aframe.set_pts(Some(self.audio_frame_in));
             self.out_aframe.set_pts(Some(self.audio_frame_out));
             self.resampler.flush(&mut self.out_aframe).unwrap();
