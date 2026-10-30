@@ -3,6 +3,7 @@ name = "rply-codec"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Encoder, decoder, and swiss army knife for retroarch emulator replays."
 
 [dependencies]
 bytemuck = { version = "1.24.0", features = ["const_zeroed"] }
@@ -13,4 +14,4 @@ rmp = "0.8.14"
 smallvec = "1.15.1"
 thiserror = "2.0.17"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
-zstd = "0.13.3"
+zstd = "0.14.3"
