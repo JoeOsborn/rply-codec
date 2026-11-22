@@ -397,6 +397,11 @@ impl<'w, 'c, W: std::io::Write> Encoder<'w, 'c, W> {
         clock::count(Counter::EncSkippedBlocks, skipped_blocks);
         clock::count(Counter::EncMemCmps, memcmps);
         clock::count(Counter::EncHashes, hashes);
+
+        // Last state is now the new encoded checkpoint
+        self.ctx.last_state.clear();
+        self.ctx.last_state.extend_from_slice(checkpoint);
+
         self.ctx.last_superseq.truncate(superblock_count);
         bytes_out += rmp_size(r::write_uint(
             self.writer,
