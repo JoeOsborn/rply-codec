@@ -307,17 +307,18 @@ impl<'w, 'c, W: std::io::Write> Encoder<'w, 'c, W> {
             .last_superseq
             .resize(superblock_count.max(self.ctx.last_superseq.len()), 0);
         let mut superblock_contents = vec![0_u32; superblock_size];
-        let can_compare_saves = if self.ctx.last_state.len() < checkpoint.len() {
-            self.ctx.last_state.clear();
-            self.ctx.last_state.extend_from_slice(checkpoint);
-            false
-        } else {
-            self.ctx.last_state.truncate(checkpoint.len());
-            self.ctx.use_encode_state_comparisons
-        };
+        let (can_compare_saves, last_state_is_current) =
+            if self.ctx.last_state.len() < checkpoint.len() {
+                self.ctx.last_state.clear();
+                self.ctx.last_state.extend_from_slice(checkpoint);
+                (false, true)
+            } else {
+                self.ctx.last_state.truncate(checkpoint.len());
+                (self.ctx.use_encode_state_comparisons, false)
+            };
         for (superblock_i, (superblock_bytes, last_state_superblock_bytes)) in (checkpoint
             .chunks(superblock_size_bytes)
-            .zip(self.ctx.last_state.chunks(superblock_size_bytes)))
+            .zip(self.ctx.last_state.chunks_mut(superblock_size_bytes)))
         .enumerate()
         {
             /* maybe: skip superblocks */
@@ -329,7 +330,7 @@ impl<'w, 'c, W: std::io::Write> Encoder<'w, 'c, W> {
             }
             for (block_i, (block_bytes, last_state_block_bytes)) in (superblock_bytes
                 .chunks(block_size)
-                .zip(last_state_superblock_bytes.chunks(block_size)))
+                .zip(last_state_superblock_bytes.chunks_mut(block_size)))
             .enumerate()
             {
                 memcmps += u64::from(can_compare_saves);
@@ -348,9 +349,15 @@ impl<'w, 'c, W: std::io::Write> Encoder<'w, 'c, W> {
                     padded_block[block_bytes.len()..].fill(0);
                     padded_block[..block_bytes.len()].copy_from_slice(block_bytes);
                     hashes += 1;
+                    if !last_state_is_current {
+                        last_state_block_bytes.copy_from_slice(block_bytes);
+                    }
                     self.ctx.block_index.insert(&padded_block, frame)
                 } else {
                     hashes += 1;
+                    if !last_state_is_current {
+                        last_state_block_bytes.copy_from_slice(block_bytes);
+                    }
                     self.ctx.block_index.insert(block_bytes, frame)
                 };
                 superblock_contents[block_i] = found_block.index;
@@ -397,11 +404,6 @@ impl<'w, 'c, W: std::io::Write> Encoder<'w, 'c, W> {
         clock::count(Counter::EncSkippedBlocks, skipped_blocks);
         clock::count(Counter::EncMemCmps, memcmps);
         clock::count(Counter::EncHashes, hashes);
-
-        // Last state is now the new encoded checkpoint
-        self.ctx.last_state.clear();
-        self.ctx.last_state.extend_from_slice(checkpoint);
-
         self.ctx.last_superseq.truncate(superblock_count);
         bytes_out += rmp_size(r::write_uint(
             self.writer,
